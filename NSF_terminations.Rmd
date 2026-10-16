@@ -5,14 +5,9 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-if (!require('rstudioapi')) BiocManager::install("rstudioapi");library(rstudioapi)
-
-# change working directory to folder with script
-setwd(dirname(rstudioapi::getSourceEditorContext()$path)) 
 
 library(tidyverse)
 library(readxl)
-library(sf)
 library(data.table)
 library(magrittr)
 
