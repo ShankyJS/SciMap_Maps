@@ -125,7 +125,7 @@ NA,NA,NA,NA,NA,City College of San Francisco,San Francisco,CA,37.72592,-122.4484
 NA,NA,NA,NA,NA,City Colleges of Chicago Harry S Truman College,Chicago,IL,41.96355,-87.65796,City Colleges of Chicago Harry S Truman College,Chicago,IL,41.96355,-87.65796
 Claflin University,Orangeburg,SC,33.49592,-80.85546,NA,NA,NA,NA,NA,Claflin University,Orangeburg,SC,33.49592,-80.85546
 Claremont Graduate University,Claremont,CA,34.10328,-117.71447,Claremont Graduate University,Claremont,CA,34.10328,-117.71447,Claremont Graduate University,Claremont,CA,34.10328,-117.71447
-Clark Atlanta University,Atlanta,GA,33.74773,-84.41301,Clark atlanta University,Atlanta,GA,33.74773,-84.41301,Clark Atlanta University,Atlanta,GA,33.74773,-84.41301
+Clark Atlanta University,Atlanta,GA,33.74773,-84.41301,Clark Atlanta University,Atlanta,GA,33.74987,-84.41235,Clark Atlanta University,Atlanta,GA,33.74773,-84.41301
 NA,NA,NA,NA,NA,Claudius Legal Intelligence Inc.,Miami,FL,25.72945,-80.30635,Claudius Legal Intelligence Inc.,Miami,FL,25.72945,-80.30635
 Clemson University,Clemson,SC,34.67315,-82.82396,Clemson University,Clemson,SC,34.67315,-82.82396,Clemson University,Clemson,SC,34.67315,-82.82396
 Cleveland Clinic Lerner College of Medicine - Case Western Reserve University,Cleveland,OH,41.50266,-81.62213,NA,NA,NA,NA,NA,Cleveland Clinic Lerner College of Medicine - Case Western Reserve University,Cleveland,OH,41.50266,-81.62213
@@ -406,7 +406,7 @@ Rand Corporation,Santa Monica,CA,34.00966,-118.49094,Rand Corporation,Santa Moni
 NA,NA,NA,NA,NA,Regents of the University of Idaho,Moscow,ID,46.72738,-117.02348,Regents of the University of Idaho,Moscow,ID,46.72738,-117.02348
 NA,NA,NA,NA,NA,Regis College,Weston,MA,42.35029,-71.30895,Regis College,Weston,MA,42.35029,-71.30895
 Rensselaer Polytechnic Institute,Troy,NY,42.73286,-73.68349,Rensselaer Polytechnic Institute,Troy,NY,42.73286,-73.68349,Rensselaer Polytechnic Institute,Troy,NY,42.73286,-73.68349
-NA,NA,NA,NA,NA,Research Foundation of the City University of New York,New York,NY,40.75572,-73.98886,Research Foundation of the City University of New York,New York,NY,40.75572,-73.98886
+Research Foundation of the City University of New York,New York,NY,40.75299,-73.98396,Research Foundation of the City University of New York,New York,NY,40.75572,-73.98886,Research Foundation of the City University of New York,New York,NY,40.75299,-73.98396
 Research Institute Nationwide Children's Hosp,Columbus,OH,39.95251,-82.9793,NA,NA,NA,NA,NA,Research Institute Nationwide Children's Hosp,Columbus,OH,39.95251,-82.9793
 Research Triangle Institute,Research Triangle Park,NC,35.9138,-78.84891,NA,NA,NA,NA,NA,Research Triangle Institute,Research Triangle Park,NC,35.9138,-78.84891
 "Resilient Games Studio, LLC",Chicago,IL,41.79896,-87.59808,NA,NA,NA,NA,NA,"Resilient Games Studio, LLC",Chicago,IL,41.79896,-87.59808
@@ -733,3 +733,16 @@ NA,NA,NA,NA,NA,University of Guam,Mangilao,GU,13.43389,144.80492,University of G
 University of Puerto Rico,Cayey,PR,18.11828,-66.16103,NA,NA,NA,NA,NA,University of Puerto Rico Cayey,Cayey,PR,18.11828,-66.16103
 NA,NA,NA,NA,NA,University of Puerto Rico,San Juan,PR,18.4402449,-66.0560077,University of Puerto Rico Rio Piedras,San Juan,PR,18.40983,-66.06296
 NA,NA,NA,NA,NA,University of Puerto Rico Mayaguez,Mayaguez,PR,18.2086,-67.14001,University of Puerto Rico Mayaguez,Mayaguez,PR,18.2086,-67.14001
+American University,Washington,DC,38.93695,-77.08947,American University,Washington,DC,38.93589,-77.09081,American University,Washington,DC,38.93695,-77.08947
+Clarkson University,Potsdam,NY,44.65482,-74.95554,Clarkson University,Potsdam,NY,44.66592,-74.99257,Clarkson University,Potsdam,NY,44.65482,-74.95554
+Eastern Michigan University,Ypsilanti,MI,42.23313,-83.62377,Eastern Michigan University,Ypsilanti,MI,42.24913,-83.62638,Eastern Michigan University,Ypsilanti,MI,42.23313,-83.62377
+Hampton University,Hampton,VA,37.02566,-76.34773,Hampton University,Hampton,VA,37.02147,-76.33691,Hampton University,Hampton,VA,37.02566,-76.34773
+North Carolina Central University,Durham,NC,35.97467,-78.89805,North Carolina Central University,Durham,NC,35.97394,-78.89891,North Carolina Central University,Durham,NC,35.97467,-78.89805
+Sam Houston State University,Huntsville,TX,30.71521,-95.54934,Sam Houston State University,Huntsville,TX,30.71443,-95.5496,Sam Houston State University,Huntsville,TX,30.71521,-95.54934
+Southern Illinois University at Edwardsville,Edwardsville,IL,38.8113,-89.95664,Southern Illinois University at Edwardsville,Edwardsville,IL,38.79305,-89.99614,Southern Illinois University at Edwardsville,Edwardsville,IL,38.8113,-89.95664
+Syracuse University,Syracuse,NY,43.04158,-76.13378,Syracuse University,Syracuse,NY,43.04935,-76.13805,Syracuse University,Syracuse,NY,43.04158,-76.13378
+Tennessee State University,Nashville,TN,36.16833,-86.82852,Tennessee State University,Nashville,TN,36.1683,-86.8256,Tennessee State University,Nashville,TN,36.16833,-86.82852
+Texas Tech University,Lubbock,TX,33.5847,-101.87277,Texas Tech University,Lubbock,TX,33.58551,-101.87713,Texas Tech University,Lubbock,TX,33.5847,-101.87277
+University of Memphis,Memphis,TN,35.12012,-89.9397,University of Memphis,Memphis,TN,35.11751,-89.94003,University of Memphis,Memphis,TN,35.12012,-89.9397
+University of North Texas,Denton,TX,33.21077,-97.14777,University of North Texas,Denton,TX,33.19624,-97.12279,University of North Texas,Denton,TX,33.21077,-97.14777
+University of West Florida,Pensacola,FL,30.54909,-87.21527,University of West Florida,Pensacola,FL,30.54912,-87.21855,University of West Florida,Pensacola,FL,30.54909,-87.21527
