@@ -1,25 +1,41 @@
 ---
 title: "NIH_terminations"
 output: html_document
+params:
+  data_dir: "data"
+  output_dir: "output"
+  county_commute: null
+  district_commute: null
+  as_of: null
 ---
 
 ```{r}
 library(tidyverse)
 library(data.table)
+
+required_params <- c("data_dir", "output_dir", "county_commute", "district_commute", "as_of")
+missing_params <- required_params[vapply(params[required_params], is.null, logical(1))]
+if (length(missing_params) > 0) stop("Missing parameters: ", paste(missing_params, collapse = ", "))
+
+as_of <- as_date(params$as_of)
+if (is.na(as_of)) stop("as_of must be an ISO date")
+start_date <- as_date("2025-02-28")
+reporting_week <- floor_date(as_of, unit = "week", week_start = if_else(wday(start_date) == 1, 7, wday(start_date) - 1))
+data_path <- function(...) file.path(params$data_dir, ...)
+output_path <- function(...) file.path(params$output_dir, ...)
+dir.create(params$output_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
 ```{r}
-terminations_raw <- read_csv("https://files.grant-witness.us/nih_v3_terminations.csv") %>%
+terminations_raw <- read_csv(data_path("nih_v3_terminations.csv")) %>%
   mutate(across(ends_with("date"), ~ as_date(.x))) %>%
   mutate(Type = as.numeric(str_sub(full_award_number, 1, 1))) %>%
   distinct()
-
-write.csv(terminations_raw, "data/nih_v3_terminations.csv")
 ```
 
 ```{r fix org names}
 # some blanket fixes on org name
-org_names_corrected <- read.csv("data/org_names_corrected.csv") %>%
+org_names_corrected <- read.csv(data_path("org_names_corrected.csv")) %>%
   filter(!is.na(corrected_name) & corrected_name != "")
 
 replacements <- c(" Of " = " of ", "At" = "at", " And " = " and ",
@@ -30,14 +46,14 @@ replacements <- c(" Of " = " of ", "At" = "at", " And " = " and ",
                   "Hosp " = "Hospital ", "Med " = "Medical ",
                   " Inst " = " Institute ", " Can " = " Cancer ")
 
-NIH_tracts <- read.csv("data/tract_dictionary.csv") %>%
+NIH_tracts <- read.csv(data_path("tract_dictionary.csv")) %>%
   mutate(tractid = str_pad(tractid, 11, pad = "0"),
          FIPS = str_pad(FIPS, 5, pad = "0"))
 
-states <- read.csv("data/states.csv") %>%
+states <- read.csv(data_path("states.csv")) %>%
   mutate(state_FIPS = str_pad(state_FIPS, 2, pad = "0"))
 
-names_v3 <- read.csv("data/org_names_v3_terminations.csv")
+names_v3 <- read.csv(data_path("org_names_v3_terminations.csv"))
 
 terminations_raw <- terminations_raw %>%
   mutate(org_name = if_else(org_name == "UNIVERSITY OF COLORADO", str_to_upper(paste(org_name, org_city, sep = " - ")), org_name))
@@ -68,7 +84,6 @@ terminations_clean <- terminations_raw %>%
   select(-corrected_name)
 
 # terminated grants in the US since 2/28/25
-start_date <- as_date("2025-02-28")
 ```
 
 ```{r}
@@ -83,12 +98,12 @@ terminations <- terminations_clean %>%
   filter(!is.na(tractid)) %>%
   filter(earliest_date_impacted >= start_date)
 
-write_csv(terminations, "data/nih_terminations_clean.csv")
+write_csv(terminations, output_path("nih_terminations_clean.csv"))
 
 terminations <- terminations %>%
   # reinstated grants are counted as negative loss
   pivot_longer(c(earliest_date_impacted, latest_date_impacted, date_reinstated), names_to = "date_status", values_to = "date") %>% 
-  filter(!is.na(date)) %>%
+  filter(!is.na(date), date <= as_of) %>%
   mutate(overall_loss = if_else(date_status == "earliest_date_impacted", current_loss, 0), # total amount ever impacted
          current_loss = 
            case_when(
@@ -102,7 +117,7 @@ terminations <- terminations %>%
              date_status == "earliest_date_impacted" ~  0),
          week = floor_date(date, unit = "week", week = if_else(wday(start_date) == 1, 7, wday(start_date) - 1)))
 
-org_dict <- read.csv("data/org_dict.csv") %>%
+org_dict <- read.csv(data_path("org_dict.csv")) %>%
   mutate(across(c(starts_with("lat"), starts_with("lon")), ~ round(.x, 5)))
 
 terminations <- terminations %>%
@@ -118,7 +133,7 @@ terminations <- terminations %>%
 # organization level
 terminations_org <- terminations %>%
   complete(nesting(org_name, org_city, org_state, lat, lon), 
-           week = seq(start_date, today(), by = "weeks"),
+           week = seq(start_date, reporting_week, by = "weeks"),
            fill = list(current_loss = 0, overall_loss = 0, current_grant_loss = 0, overall_grant_loss = 0)) %>%
   group_by(org_name, org_city, org_state, lat, lon, week) %>%
   summarize(across(c(current_loss, overall_loss, current_grant_loss, overall_grant_loss), ~ sum(.x))) %>%
@@ -132,7 +147,7 @@ terminations_org <- terminations %>%
          overall_job_loss = overall_loss * job_val) %>%
   select(org_name, org_city, org_state, lat, lon, starts_with(c("week", "current", "overall")))
 
-write_csv(terminations_org, "output/terminations_org.csv")
+write_csv(terminations_org, output_path("terminations_org.csv"))
 
 terminations_sum <- terminations %>%
   group_by(tractid, week) %>%
@@ -141,7 +156,7 @@ terminations_sum <- terminations %>%
 ```
 
 ```{r commutes}
-county_commute <- fread("data/county_commute_NIH.csv") %>%
+county_commute <- fread(params$county_commute) %>%
   select(DESTINATION, DESTINATION_total_workers, Commuters, ORIGIN, proportion) %>% 
   mutate(DESTINATION = str_pad(DESTINATION, 11, pad = "0"),
          ORIGIN = str_pad(ORIGIN, 5, pad = "0"))
@@ -170,7 +185,7 @@ county_commute %>%
 
 
 # district level
-cong_commute <- fread("https://osf.io/m5kb6/download") %>%
+cong_commute <- fread(params$district_commute) %>%
   mutate(Cong_DESTINATION = str_pad(w_tract, 11, pad = "0"),
          Cong_ORIGIN = str_pad(h_cd119, 4, pad = "0")) %>%
   rename(commuters = commutes) %>%
@@ -187,7 +202,7 @@ cong_commute_territory <- terminations %>%
   select(DESTINATION, total_workers, commuters, ORIGIN, proportion) %>%
   distinct()
 
-cong_info <- read.csv("./data/us_representatives_119th_congress.csv") %>%
+cong_info <- read.csv(data_path("us_representatives_119th_congress.csv")) %>%
   mutate(GEOID = str_pad(GEOID, 4, pad = "0")) %>%
   select(GEOID, STATE_NAME, NAME, PARTY) %>%
   rename(state = STATE_NAME,
@@ -231,7 +246,7 @@ terminations_sum_comm <- county_commute %>%
   rename(FIPS = ORIGIN) %>%
   filter(!endsWith(FIPS, "000")) %>%
   ungroup() %>%
-  complete(FIPS, week = seq(start_date, today(), by = "weeks"),
+  complete(FIPS, week = seq(start_date, reporting_week, by = "weeks"),
            fill = list(current_loss = 0, 
                        current_econ_loss = 0, 
                        current_job_loss = 0, 
@@ -242,15 +257,15 @@ terminations_sum_comm <- county_commute %>%
   arrange(week) %>%
   mutate(across(current_loss:overall_job_loss, ~cumsum(.x)))
 
-write_csv(terminations_sum_comm, "output/terminations_county.csv")
+write_csv(terminations_sum_comm, output_path("terminations_county.csv"))
 
-msa <- read.csv("data/cbsa2fipsxw_2023.csv") %>%
+msa <- read.csv(data_path("cbsa2fipsxw_2023.csv")) %>%
   select(CountyFIPS, CBSA_NAME, CBSA_FIPS) %>%
   rename(FIPS = CountyFIPS) %>%
   mutate(FIPS = str_pad(FIPS, 5, pad ="0"),
          CBSA_FIPS = str_pad(CBSA_FIPS, 5, pad ="0"))
 
-fips_names <- read.csv("data/state_and_county_fips_master.csv") %>%
+fips_names <- read.csv(data_path("state_and_county_fips_master.csv")) %>%
   mutate(FIPS = str_pad(FIPS, 5, pad ="0")) %>%
   select(FIPS, name)
 
@@ -261,7 +276,7 @@ terminations_sum_comm %>%
   mutate(CBSA_NAME = if_else(is.na(CBSA_NAME), name, CBSA_NAME)) %>%
   group_by(CBSA_FIPS, CBSA_NAME, week) %>%
   summarise(across(ends_with("loss"), ~ sum(.x))) %>%
-  write_csv("output/terminations_city.csv")
+  write_csv(output_path("terminations_city.csv"))
 
 # congressional district
 terminations_sum_cong <- cong_commute %>%
@@ -279,7 +294,7 @@ terminations_sum_cong <- cong_commute %>%
   summarize(across(current_loss:overall_job_loss, ~sum(.x))) %>%
   rename(GEOID = ORIGIN) %>%
   ungroup() %>%
-  complete(GEOID, week = seq(start_date, today(), by = "weeks"),
+  complete(GEOID, week = seq(start_date, reporting_week, by = "weeks"),
            fill = list(current_loss = 0, 
                        current_econ_loss = 0, 
                        current_job_loss = 0, 
@@ -290,14 +305,14 @@ terminations_sum_cong <- cong_commute %>%
   arrange(week) %>%
   mutate(across(current_loss:overall_job_loss, ~cumsum(.x)))
 
-write_csv(terminations_sum_cong, "output/terminations_district.csv")
+write_csv(terminations_sum_cong, output_path("terminations_district.csv"))
 
 terminations_sum_cong %>%
   mutate(state_FIPS = str_sub(GEOID, 1, 2)) %>%
   left_join(states) %>%
   group_by(state, week) %>%
   summarise(across(ends_with("loss"), ~ sum(.x))) %>%
-  write_csv("output/terminations_state.csv")
+  write_csv(output_path("terminations_state.csv"))
 ```
 
 ```{r check values}

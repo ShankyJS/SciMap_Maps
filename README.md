@@ -12,6 +12,24 @@ In addition, the IDC\_map script calculates the loss projected from the proposed
 
 All output files are stored in the output folder.
 
+## Reproducing termination outputs offline
+
+The termination notebooks read saved inputs only; source retrieval is separate from scientific execution. `scripts/run_termination_pipeline.py` runs NIH, NSF and Combined in fresh R processes, records input hashes, and reconciles every scientific output against an approved reference directory.
+
+The repository supplies the versioned Grant Witness snapshots and maintained references. Two large inputs stay outside Git: the approved `county_commute_NIH.csv` and a saved copy of OSF `home_119_workTR.csv`. Do not substitute the older Drive `states.csv` or `tract_dictionary.csv` for the repository versions.
+
+```bash
+R_LIBS_USER=/path/to/pinned-r-library \
+python3 scripts/run_termination_pipeline.py \
+  --as-of 2026-09-25 \
+  --county-commute /path/to/county_commute_NIH.csv \
+  --district-commute /path/to/home_119_workTR.csv \
+  --reference-output output \
+  --output /tmp/termination-replay
+```
+
+The command refuses to overwrite its output. A successful run writes the generated CSVs and `run-report.json`; no notebook downloads or publishing occur. `external-inputs.lock.csv` rejects unapproved large inputs, while `r-version.txt` and `r-packages.lock.csv` validate the R environment.
+
 ## Project Structure
 ```
 ├── data/                               # Raw data
