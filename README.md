@@ -37,6 +37,8 @@ python3 scripts/run_termination_pipeline.py \
 
 The command refuses to overwrite its output. A successful run writes the generated CSVs and `run-report.json`; no notebook downloads or publishing occur. `external-inputs.lock.csv` rejects unapproved large inputs, while `r-version.txt` and `r-packages.lock.csv` validate the R environment.
 
+For a new-data candidate, pass the immutable directory created by the capture command with `--source-snapshot`, and add `--comparison-mode report`. Report mode still enforces schemas, finite values, unique generated keys, input integrity and package locks, but records expected scientific changes from the prior approved output instead of requiring identical values.
+
 ## Project Structure
 ```
 ├── data/                               # Raw data

@@ -13,9 +13,8 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_FILES = (
-    "nih_v3_terminations.csv",
-    "nsf_terminations.csv",
+RAW_DATA_FILES = ("nih_v3_terminations.csv", "nsf_terminations.csv")
+REFERENCE_DATA_FILES = (
     "org_names_corrected.csv",
     "org_names_v3_terminations.csv",
     "nsf_names_corrected.csv",
@@ -91,11 +90,27 @@ def validate_external_inputs(paths):
             raise RuntimeError(f"External input does not match approved checksum: {path}")
 
 
+def validate_source_snapshot(directory):
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.is_file():
+        raise RuntimeError(f"Missing source snapshot manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    files = manifest.get("files", {})
+    for name in RAW_DATA_FILES:
+        path = directory / name
+        if not path.is_file() or name not in files:
+            raise RuntimeError(f"Incomplete source snapshot: {name}")
+        expected = files[name]
+        if file_record(path) != {"bytes": expected["bytes"], "sha256": expected["sha256"]}:
+            raise RuntimeError(f"Source snapshot checksum mismatch: {path}")
+    return manifest_path
+
+
 def numeric_columns(fieldnames):
     return tuple(name for name in fieldnames if "loss" in name)
 
 
-def grouped_values(path, keys):
+def grouped_values(path, keys, require_unique=False):
     grouped = {}
     coordinates = {}
     with path.open(newline="") as source:
@@ -110,6 +125,8 @@ def grouped_values(path, keys):
             raise RuntimeError(f"No loss measures found in {path}")
         for line, row in enumerate(reader, 2):
             key = tuple(row[name] for name in keys)
+            if require_unique and key in grouped:
+                raise RuntimeError(f"Duplicate key at {path}:{line}: {key}")
             values = grouped.setdefault(key, {name: 0.0 for name in measures})
             for name in measures:
                 try:
@@ -124,26 +141,34 @@ def grouped_values(path, keys):
     return grouped, coordinates, measures
 
 
-def compare_csv(actual_path, expected_path, keys, absolute_tolerance, relative_tolerance):
-    actual, actual_coords, actual_measures = grouped_values(actual_path, keys)
+def compare_csv(
+    actual_path, expected_path, keys, absolute_tolerance, relative_tolerance, mode="exact"
+):
+    actual, actual_coords, actual_measures = grouped_values(actual_path, keys, require_unique=True)
     expected, expected_coords, expected_measures = grouped_values(expected_path, keys)
     if set(actual_measures) != set(expected_measures):
         raise RuntimeError(f"Measure columns differ for {actual_path.name}")
-    if set(actual) != set(expected):
-        missing = len(set(expected) - set(actual))
-        extra = len(set(actual) - set(expected))
-        raise RuntimeError(f"Keys differ for {actual_path.name}: {missing} missing, {extra} extra")
+
+    actual_keys, expected_keys = set(actual), set(expected)
+    added, removed = actual_keys - expected_keys, expected_keys - actual_keys
+    if mode == "exact" and (added or removed):
+        raise RuntimeError(
+            f"Keys differ for {actual_path.name}: {len(removed)} missing, {len(added)} extra"
+        )
 
     max_difference = 0.0
-    for key in actual:
+    changed_values = 0
+    for key in actual_keys & expected_keys:
         for measure in actual_measures:
             left, right = actual[key][measure], expected[key][measure]
             difference = abs(left - right)
             max_difference = max(max_difference, difference)
             if not math.isclose(left, right, abs_tol=absolute_tolerance, rel_tol=relative_tolerance):
-                raise RuntimeError(
-                    f"{actual_path.name} differs at {key} {measure}: generated {left}, expected {right}"
-                )
+                changed_values += 1
+                if mode == "exact":
+                    raise RuntimeError(
+                        f"{actual_path.name} differs at {key} {measure}: generated {left}, expected {right}"
+                    )
 
     coordinate_changes = sum(
         actual_coords.get(key, set()) != expected_coords.get(key, set())
@@ -151,7 +176,10 @@ def compare_csv(actual_path, expected_path, keys, absolute_tolerance, relative_t
     )
     return {
         "keys": len(actual),
+        "keys_added": len(added),
+        "keys_removed": len(removed),
         "measures": len(actual_measures),
+        "changed_values": changed_values,
         "max_absolute_difference": max_difference,
         "coordinate_keys_changed": coordinate_changes,
     }
@@ -163,7 +191,14 @@ def parse_args():
     parser.add_argument("--county-commute", required=True)
     parser.add_argument("--district-commute", required=True)
     parser.add_argument("--reference-output", required=True)
+    parser.add_argument(
+        "--comparison-mode",
+        choices=("exact", "report"),
+        default="exact",
+        help="Use report for a validated new-data candidate whose values should differ",
+    )
     parser.add_argument("--output", required=True)
+    parser.add_argument("--source-snapshot", help="Immutable Grant Witness snapshot directory")
     parser.add_argument("--data-dir", default=ROOT / "data")
     parser.add_argument("--nsf-data-dir", default=ROOT / "nsf_data")
     parser.add_argument("--rscript", default="Rscript")
@@ -188,8 +223,14 @@ def main():
     if output.exists():
         raise SystemExit(f"Refusing to overwrite output: {output}")
 
-    source_inputs = checked_files(data_dir, DATA_FILES)
-    source_inputs += checked_files(nsf_data_dir, NSF_DATA_FILES)
+    reference_inputs = checked_files(data_dir, REFERENCE_DATA_FILES)
+    source_snapshot = Path(args.source_snapshot).resolve() if args.source_snapshot else data_dir
+    raw_inputs = checked_files(source_snapshot, RAW_DATA_FILES)
+    snapshot_manifest = validate_source_snapshot(source_snapshot) if args.source_snapshot else None
+    nsf_inputs = checked_files(nsf_data_dir, NSF_DATA_FILES)
+    source_inputs = reference_inputs + raw_inputs + nsf_inputs
+    if snapshot_manifest:
+        source_inputs.append(snapshot_manifest)
     reference_files = checked_files(reference_output, OUTPUT_SCHEMAS)
     external_inputs = {
         "county_commute_NIH.csv": county_commute,
@@ -200,8 +241,16 @@ def main():
             raise SystemExit(f"Missing required input: {path}")
         source_inputs.append(path)
     validate_external_inputs(external_inputs)
-    source_records = {str(path): file_record(path) for path in source_inputs}
-    reference_records = {str(path): file_record(path) for path in reference_files}
+    source_records = {
+        **{f"data/{path.name}": file_record(path) for path in reference_inputs},
+        **{f"source-snapshot/{path.name}": file_record(path) for path in raw_inputs},
+        **{f"nsf_data/{path.name}": file_record(path) for path in nsf_inputs},
+        **{f"external/{name}": file_record(path) for name, path in external_inputs.items()},
+    }
+    if snapshot_manifest:
+        source_records["source-snapshot/manifest.json"] = file_record(snapshot_manifest)
+    source_hashes_by_path = {path: file_record(path) for path in source_inputs}
+    reference_records = {path.name: file_record(path) for path in reference_files}
 
     run([args.rscript, ROOT / "scripts/check_r_environment.R", ROOT / "r-version.txt", ROOT / "r-packages.lock.csv"])
 
@@ -209,12 +258,20 @@ def main():
     with tempfile.TemporaryDirectory(prefix="termination-run-", dir=output.parent) as temporary:
         generated = Path(temporary) / "output"
         generated.mkdir()
-        notebook_args = [data_dir, nsf_data_dir, generated, county_commute, district_commute, args.as_of]
+        execution_data = data_dir
+        if args.source_snapshot:
+            execution_data = Path(temporary) / "data"
+            execution_data.mkdir()
+            for path in checked_files(data_dir, REFERENCE_DATA_FILES):
+                (execution_data / path.name).symlink_to(path)
+            for path in checked_files(source_snapshot, RAW_DATA_FILES):
+                (execution_data / path.name).symlink_to(path)
+        notebook_args = [execution_data, nsf_data_dir, generated, county_commute, district_commute, args.as_of]
         for notebook in ("NIH_terminations.Rmd", "NSF_terminations.Rmd", "combined_terminations.Rmd"):
             run([args.rscript, ROOT / "scripts/run_notebook.R", ROOT / notebook, *notebook_args])
 
         changed_inputs = [
-            path for path in source_inputs if file_record(path) != source_records[str(path)]
+            path for path in source_inputs if file_record(path) != source_hashes_by_path[path]
         ]
         if changed_inputs:
             raise RuntimeError("Scientific execution modified inputs: " + ", ".join(map(str, changed_inputs)))
@@ -227,6 +284,7 @@ def main():
                 keys,
                 args.absolute_tolerance,
                 args.relative_tolerance,
+                args.comparison_mode,
             )
 
         report = {
@@ -235,7 +293,8 @@ def main():
             "code": git_state(),
             "inputs": source_records,
             "comparison": {
-                "reference_output": str(reference_output),
+                "mode": args.comparison_mode,
+                "reference_output": "approved-output-fixture",
                 "reference_files": reference_records,
                 "absolute_tolerance": args.absolute_tolerance,
                 "relative_tolerance": args.relative_tolerance,

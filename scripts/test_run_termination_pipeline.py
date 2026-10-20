@@ -47,6 +47,36 @@ class ComparisonTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "differs"):
                 PIPELINE.compare_csv(actual, expected, ("state", "week"), 0.01, 1e-9)
 
+    def test_report_mode_records_expected_new_data_differences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            expected = directory / "expected.csv"
+            actual = directory / "actual.csv"
+            self.write_csv(expected, [{"state": "MD", "week": "2026-09-25", "current_loss": "1"}])
+            self.write_csv(actual, [
+                {"state": "MD", "week": "2026-09-25", "current_loss": "2"},
+                {"state": "VA", "week": "2026-10-16", "current_loss": "3"},
+            ])
+
+            result = PIPELINE.compare_csv(
+                actual, expected, ("state", "week"), 0.01, 1e-9, mode="report"
+            )
+
+            self.assertEqual(result["keys_added"], 1)
+            self.assertEqual(result["changed_values"], 1)
+
+    def test_rejects_duplicate_generated_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            expected = directory / "expected.csv"
+            actual = directory / "actual.csv"
+            row = {"state": "MD", "week": "2026-09-25", "current_loss": "1"}
+            self.write_csv(expected, [row])
+            self.write_csv(actual, [row, row])
+
+            with self.assertRaisesRegex(RuntimeError, "Duplicate key"):
+                PIPELINE.compare_csv(actual, expected, ("state", "week"), 0.01, 1e-9)
+
     def test_rejects_non_finite_value(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "values.csv"
