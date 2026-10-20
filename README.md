@@ -14,7 +14,14 @@ All output files are stored in the output folder.
 
 ## Reproducing termination outputs offline
 
-The termination notebooks read saved inputs only; source retrieval is separate from scientific execution. `scripts/run_termination_pipeline.py` runs NIH, NSF and Combined in fresh R processes, records input hashes, and reconciles every scientific output against an approved reference directory.
+The termination notebooks read saved inputs only; source retrieval is separate from scientific execution. Capture a new immutable Grant Witness snapshot with:
+
+```bash
+python3 scripts/capture_termination_sources.py \
+  --output /path/to/snapshots/<snapshot-id>
+```
+
+The capture command validates required columns and records retrieval time, row counts and checksums. Copy or link its two CSVs into a versioned input tree only after review. `scripts/run_termination_pipeline.py` then runs NIH, NSF and Combined in fresh R processes, records all input hashes, and reconciles every scientific output against an approved reference directory.
 
 The repository supplies the versioned Grant Witness snapshots and maintained references. Two large inputs stay outside Git: the approved `county_commute_NIH.csv` and a saved copy of OSF `home_119_workTR.csv`. Do not substitute the older Drive `states.csv` or `tract_dictionary.csv` for the repository versions.
 
