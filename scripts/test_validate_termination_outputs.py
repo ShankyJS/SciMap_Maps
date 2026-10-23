@@ -3,8 +3,10 @@ from datetime import date
 import importlib.util
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 
+sys.path.insert(0, str(Path(__file__).parent))
 MODULE_PATH = Path(__file__).with_name("validate_termination_outputs.py")
 SPEC = importlib.util.spec_from_file_location("validate_termination_outputs", MODULE_PATH)
 VALIDATOR = importlib.util.module_from_spec(SPEC)
@@ -83,10 +85,9 @@ def build_fixture(root):
 def rewrite(path, change):
     with path.open(newline="") as source:
         rows = list(csv.DictReader(source))
-    fieldnames = list(rows[0])
     for row in rows:
         change(row)
-    write(path, rows, fieldnames)
+    write(path, rows, list(rows[0]))
 
 
 class ValidationTests(unittest.TestCase):
@@ -115,6 +116,20 @@ class ValidationTests(unittest.TestCase):
                 row["current_loss"] = "-5"
         rewrite(self.run_dir / "terminations_org_nsf.csv", negative)
         self.assert_fails("nsf_institution_series_validity")
+
+    def test_problems_read_naturally(self):
+        def negative(row):
+            if row["week"] == WEEKS[0]:
+                row["current_loss"] = "-2022718.4"
+        rewrite(self.run_dir / "terminations_org_nsf.csv", negative)
+        check = next(c for c in self.validate()["checks"] if c["name"] == "nsf_institution_series_validity")
+        self.assertEqual(
+            check["problems"],
+            [f"nsf institution Example University (Berkeley, CA): negative current_loss in week {WEEKS[0]}"],
+        )
+        self.assertEqual(VALIDATOR.amount("current_loss", -2022718.4), "-$2,022,718.40")
+        self.assertEqual(VALIDATOR.amount("overall_job_loss", 60491.54), "60,491.54 jobs")
+        self.assertEqual(VALIDATOR.amount("current_grant_loss", 3), "3 grants")
 
     def test_overall_loss_must_not_decrease(self):
         def fall(row):
@@ -163,6 +178,71 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(check["unmatched_grants"], 1)
         self.assertEqual(check["unmatched_loss"], 150.0)
         self.assertEqual(check["status"], "error")  # 100% unmatched exceeds the provisional limit
+
+    def copy_sources(self, target):
+        target.mkdir(exist_ok=True)
+        for name in ("nih_v3_terminations.csv", "nsf_terminations.csv"):
+            with (self.source / name).open(newline="") as source:
+                write(target / name, list(csv.DictReader(source)))
+
+    def test_added_source_column_warns(self):
+        baseline = Path(self.directory.name) / "approved-snapshot"
+        self.copy_sources(baseline)
+        rewrite(self.source / "nih_v3_terminations.csv", lambda row: row.update(new_column="x"))
+        result = VALIDATOR.validate_run(self.run_dir, self.data, self.source, AS_OF, self.run_dir, baseline)
+        self.assertEqual(result["status"], "passed", result["errors"])
+        self.assertEqual(result["warnings"], ["source_schema_drift:nih_v3_terminations.csv"])
+        check = next(check for check in result["checks"] if check["name"] == result["warnings"][0])
+        self.assertEqual(check["title"], "NIH Grant Witness file: columns changed")
+        self.assertIn("column added new_column", check["problems"][0])
+
+    def test_repository_copies_are_not_a_column_baseline(self):
+        self.copy_sources(self.data)
+        rewrite(self.source / "nih_v3_terminations.csv", lambda row: row.update(new_column="x"))
+        result = VALIDATOR.validate_run(self.run_dir, self.data, self.source, AS_OF, self.run_dir)
+        self.assertEqual(result["warnings"], [])
+
+    def multiplier_case(self, gap):
+        write(self.data / "states.csv", [
+            {"state_name": "Maryland", "state": "MD", "econ_mult": "2.5", "job_val": "0.002", "state_FIPS": "24"},
+            {"state_name": "District of Columbia", "state": "DC", "econ_mult": "2", "job_val": "0.001", "state_FIPS": "11"},
+        ])
+        report = VALIDATOR.Report()
+        report.add("nih_institution_multiplier_consistency", "warning", ["institutions vs geography"])
+        report.add("nih_institution_tract_state_conflicts", "warning", ["Clinic: institution MD vs tract DC"],
+                   relocated=[{"org_name": "Clinic", "org_state": "MD", "tract_state": "DC"}], partial=0)
+        orgs = {(("Clinic", "Washington", "MD"), WEEKS[0]): {"current_loss": 100.0, "overall_loss": 200.0}}
+        # MD minus DC: econ +0.5 and jobs +0.001 per dollar.
+        gaps = {WEEKS[0]: {"current_econ_loss": 50.0 + gap, "current_job_loss": 0.1,
+                           "overall_econ_loss": 100.0, "overall_job_loss": 0.2}}
+        VALIDATOR.explain_multiplier_differences(report, orgs, gaps, self.data)
+        return report
+
+    def test_state_conflict_explains_multiplier_difference(self):
+        report = self.multiplier_case(gap=0)
+        self.assertEqual(report.result()["warnings"], ["nih_institution_tract_state_conflicts"])
+        self.assertEqual(report.get("nih_institution_multiplier_consistency")["status"], "info")
+
+    def test_multiplier_gap_beyond_state_conflicts_still_warns(self):
+        report = self.multiplier_case(gap=500)
+        check = report.get("nih_institution_multiplier_consistency")
+        self.assertEqual(check["status"], "warning")
+        self.assertEqual(check["problems"], [f"nih {WEEKS[0]} current_econ_loss: $500.00 beyond the state conflicts"])
+
+    def test_partial_state_conflict_is_not_reconciled(self):
+        report = self.multiplier_case(gap=0)
+        report.get("nih_institution_multiplier_consistency")["status"] = "warning"
+        report.get("nih_institution_tract_state_conflicts")["partial"] = 1
+        VALIDATOR.explain_multiplier_differences(report, {}, {}, self.data)
+        self.assertEqual(report.get("nih_institution_multiplier_consistency")["status"], "warning")
+
+    def test_missing_source_baseline_fails(self):
+        with self.assertRaisesRegex(RuntimeError, "Source baseline is missing nih_v3_terminations.csv"):
+            VALIDATOR.validate_run(self.run_dir, self.data, self.source, AS_OF, self.run_dir, Path(self.directory.name) / "typo")
+
+    def test_checks_have_plain_titles(self):
+        for check in self.validate()["checks"]:
+            self.assertNotIn("_", check["title"], check["name"])
 
     def test_territory_county_is_accepted_by_state_prefix(self):
         write(self.data / "states.csv", [

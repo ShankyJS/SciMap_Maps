@@ -201,6 +201,10 @@ def parse_args():
     )
     parser.add_argument("--output", required=True)
     parser.add_argument("--source-snapshot", help="Immutable Grant Witness snapshot directory")
+    parser.add_argument(
+        "--source-baseline",
+        help="Last approved raw Grant Witness snapshot; Grant Witness column changes are reported against it",
+    )
     parser.add_argument("--data-dir", default=ROOT / "data")
     parser.add_argument("--nsf-data-dir", default=ROOT / "nsf_data")
     parser.add_argument("--rscript", default="Rscript")
@@ -257,6 +261,9 @@ def main():
     }
     if snapshot_manifest:
         source_records["source-snapshot/manifest.json"] = file_record(snapshot_manifest)
+    if args.source_baseline:
+        baseline_inputs = checked_files(Path(args.source_baseline).resolve(), RAW_DATA_FILES)
+        source_records.update({f"source-baseline/{path.name}": file_record(path) for path in baseline_inputs})
     source_hashes_by_path = {path: file_record(path) for path in source_inputs}
     reference_records = {path.name: file_record(path) for path in reference_files}
 
@@ -296,7 +303,8 @@ def main():
             )
 
         validation = validate_run(
-            generated, data_dir, source_snapshot, date.fromisoformat(args.as_of), reference_output
+            generated, data_dir, source_snapshot, date.fromisoformat(args.as_of), reference_output,
+            args.source_baseline and Path(args.source_baseline).resolve(),
         )
         failed = args.validation == "enforce" and validation["status"] != "passed"
         report = {

@@ -28,6 +28,7 @@ GEO_MEASURES = (
     "overall_job_loss",
 )
 BASE_MEASURES = ("current_loss", "overall_loss")
+MULTIPLIER_MEASURES = tuple(name for name in GEO_MEASURES if name not in BASE_MEASURES)
 AGENCIES = {"nih": "", "nsf": "_nsf"}
 LEVEL_KEYS = {
     "state": ("state",),
@@ -100,6 +101,43 @@ def close(left, right, absolute=1.0, relative=1e-9):
     return math.isclose(left, right, abs_tol=absolute, rel_tol=relative)
 
 
+AGENCY = {"nih": "NIH", "nsf": "NSF", "combined": "Combined"}
+SOURCE = {"nih_v3_terminations.csv": "NIH", "nsf_terminations.csv": "NSF"}
+TITLES = {
+    "source_schema": "{} Grant Witness file: required columns or values invalid",
+    "source_schema_drift": "{} Grant Witness file: columns changed",
+    "source_freshness": "Grant Witness freshness",
+    "dictionary_duplicate_keys": "Dictionaries: duplicate names (unused)",
+    "grant_rows_unique_after_joins": "NIH grants counted more than once by the location lookup",
+    "common_reporting_week": "Reporting week",
+    "output_structure": "{} outputs: malformed rows",
+    "series_validity": "{} maps: negative, incomplete or falling weekly losses",
+    "geographic_reconciliation": "{} maps: state, county, district and city totals disagree",
+    "geographic_identifiers": "{} maps: unknown places",
+    "institution_series_validity": "{} institutions: negative, incomplete or falling weekly losses",
+    "allocation_conserves_dollars": "{} institutions: dollars differ from the maps",
+    "institution_multiplier_consistency": "{} institutions: economic impact differs from the maps",
+    "institution_identity": "Institutions: missing names or coordinates",
+    "combined_institution_reconciliation": "Combined institutions: not equal to NIH + NSF",
+    "institution_coordinate_conflicts": "Institutions: NIH and NSF coordinates differ",
+    "institution_name_collisions": "Institutions: similar names",
+    "new_institutions": "Institutions: new since the approved run",
+    "unmatched_locations": "{} grants without a map location",
+    "institution_tract_state_conflicts": "{} institutions: listed state differs from the mapped location",
+    "drift_from_reference": "Totals changed more than expected since the approved run",
+}
+
+
+def title(name):
+    base, _, source = name.partition(":")
+    if source:
+        return TITLES.get(base, name).format(SOURCE.get(source, source))
+    agency, _, rest = name.partition("_")
+    if agency in AGENCY and rest in TITLES:
+        return TITLES[rest].format(AGENCY[agency])
+    return TITLES.get(name, name).format("")
+
+
 class Report:
     def __init__(self):
         self.checks = []
@@ -108,11 +146,15 @@ class Report:
         status = "passed" if not problems else severity
         self.checks.append({
             "name": name,
+            "title": title(name),
             "status": status,
             "problems": problems[:LIST_LIMIT],
             "problem_count": len(problems),
             **details,
         })
+
+    def get(self, name):
+        return next((check for check in self.checks if check["name"] == name), None)
 
     def result(self):
         failed = [check["name"] for check in self.checks if check["status"] == "error"]
@@ -140,7 +182,7 @@ def load_level(path, keys):
             if not math.isfinite(measures[name]):
                 problems.append(f"{path.name}:{line} non-finite {name}")
         if (key, row["week"]) in values:
-            problems.append(f"{path.name}:{line} duplicate {key} {row['week']}")
+            problems.append(f"{path.name}:{line} duplicate {label(key)} {row['week']}")
         values[(key, row["week"])] = measures
     return values, problems
 
@@ -153,6 +195,22 @@ def week_totals(values):
     return totals
 
 
+def label(key):
+    """Readable identifier: '06013', or 'Name (City, ST)' for institutions."""
+    key = tuple(key) if isinstance(key, tuple) else (key,)
+    if len(key) == 3:
+        return f"{key[0]} ({key[1]}, {key[2]})"
+    return " / ".join(str(part) for part in key)
+
+
+def amount(measure, value):
+    if "grant" in measure:
+        return f"{value:,.0f} grants"
+    if "job" in measure:
+        return f"{value:,.2f} jobs"
+    return f"-${-value:,.2f}" if value < 0 else f"${value:,.2f}"
+
+
 def series_checks(name, values, weeks):
     """Complete weekly series, non-negative values, current <= overall, overall never falls."""
     problems = []
@@ -161,20 +219,20 @@ def series_checks(name, values, weeks):
         by_key[key][week] = measures
     for key, series in by_key.items():
         if set(series) != weeks:
-            problems.append(f"{name} {key}: {len(series)} of {len(weeks)} weeks")
+            problems.append(f"{name} {label(key)}: {len(series)} of {len(weeks)} weeks")
             continue
         previous = None
         for week in sorted(series):
             measures = series[week]
             negative = [m for m, v in measures.items() if v < -1e-6]
             if negative:
-                problems.append(f"{name} {key} {week}: negative {', '.join(negative)} ({measures[negative[0]]:.2f})")
+                problems.append(f"{name} {label(key)} {week}: negative {', '.join(negative)} ({amount(negative[0], measures[negative[0]])})")
             if measures["current_loss"] > measures["overall_loss"] + 1e-6:
-                problems.append(f"{name} {key} {week}: current_loss exceeds overall_loss")
+                problems.append(f"{name} {label(key)} {week}: current_loss exceeds overall_loss")
             if previous and any(
                 measures[m] < previous[m] - 1e-6 for m in ("overall_loss", "overall_econ_loss")
             ):
-                problems.append(f"{name} {key} {week}: overall loss decreased")
+                problems.append(f"{name} {label(key)} {week}: overall loss decreased")
             previous = measures
     return problems, len(by_key)
 
@@ -192,7 +250,10 @@ def collapse(problems):
     collapsed = []
     for (head, tail), weeks in grouped.items():
         weeks = sorted(week for week in weeks if week)
-        span = f" in {len(weeks)} weeks {weeks[0]}..{weeks[-1]}" if weeks else ""
+        if len(weeks) == 1:
+            span = f" in week {weeks[0]}"
+        else:
+            span = f" in {len(weeks)} weeks {weeks[0]}..{weeks[-1]}" if weeks else ""
         collapsed.append(f"{head}: {tail}{span}")
     return collapsed
 
@@ -214,7 +275,9 @@ def content_digest(path, contract):
     return digest.hexdigest()
 
 
-def check_sources(report, source_dir, reference_dir, as_of):
+def check_sources(report, source_dir, reference_dir, as_of, source_baseline=None):
+    """Column changes are compared with an approved raw snapshot (source_baseline) only:
+    the repository copies under data/ were rewritten by R and differ in harmless columns."""
     summaries = {}
     for filename, contract in SOURCE_CONTRACT.items():
         path = source_dir / filename
@@ -242,18 +305,29 @@ def check_sources(report, source_dir, reference_dir, as_of):
                             future_events += 1
                         elif latest_event is None or parsed > latest_event:
                             latest_event = parsed
-        previous = reference_dir / filename if reference_dir else None
+        baseline = source_baseline / filename if source_baseline else None
+        if baseline and not baseline.is_file():
+            raise RuntimeError(f"Source baseline is missing {filename}: {source_baseline}")
+        previous = baseline or (reference_dir / filename if reference_dir else None)
         drift = {}
-        if previous and previous.is_file():
-            old = header(previous)
+        if baseline and baseline.is_file():
+            old = header(baseline)
             drift = {
                 "columns_added": [c for c in columns if c not in old],
                 "columns_removed": [c for c in old if c not in columns],
             }
+        if previous and previous.is_file():
+            old = header(previous)
             if not problems and all(c in old for c in contract["columns"]):
                 drift["required_data_changed"] = (
                     content_digest(path, contract) != content_digest(previous, contract)
                 )
+        added, removed = drift.get("columns_added", []), drift.get("columns_removed", [])
+        report.add(
+            f"source_schema_drift:{filename}", "warning",
+            [f"{filename}: column added {c or '(unnamed)'}" for c in added]
+            + [f"{filename}: column removed {c or '(unnamed)'}" for c in removed],
+        )
         summaries[filename] = {
             "schema_valid": not problems,
             "rows": count,
@@ -277,9 +351,10 @@ def check_dictionaries(report, data_dir, clean_path):
             key = tuple(row[name] for name in keys)
             values = tuple(sorted(row.items()))
             if key in seen and seen[key] != values:
-                warnings.append(f"{filename}: {key} maps to more than one entry")
+                warnings.append(f"{filename}: {label(key).strip() or '(blank name)'} maps to more than one entry")
             seen.setdefault(key, values)
-    report.add("dictionary_duplicate_keys", "warning", sorted(set(warnings)))
+    # Informational: a duplicate only matters when a grant uses it, which is an error below.
+    report.add("dictionary_duplicate_keys", "info", sorted(set(warnings)))
 
     # A duplicate join key only multiplies funding when a grant actually uses it.
     if clean_path.is_file():
@@ -320,7 +395,7 @@ def check_geography(report, run_dir, data_dir, as_of):
                 for name in GEO_MEASURES:
                     left, right = totals[level][week][name], totals["state"][week][name]
                     if not close(left, right):
-                        mismatches.append(f"{agency} {level} {week} {name}: {left:.2f} vs state {right:.2f}")
+                        mismatches.append(f"{agency} {level} {week} {name}: {amount(name, left)} vs state {amount(name, right)}")
         report.add(f"{agency}_geographic_reconciliation", "error", mismatches)
         totals_by_agency[agency] = totals["state"]
 
@@ -354,19 +429,20 @@ def load_orgs(path, suffix=""):
     for line, row in enumerate(rows(path), 2):
         identity = tuple(row[name] for name in ORG_KEY)
         if (identity, row["week"]) in values:
-            problems.append(f"{path.name}:{line} duplicate institution/week {identity} {row['week']}")
+            problems.append(f"{path.name}:{line} duplicate institution/week {label(identity)} {row['week']}")
         values[(identity, row["week"])] = {
             name: float(row[name + suffix]) for name in GEO_MEASURES + ("current_grant_loss", "overall_grant_loss")
         }
         coordinates[identity].add((round(float(row["lat"]), 5), round(float(row["lon"]), 5)))
     for identity, points in coordinates.items():
         if len(points) > 1:
-            problems.append(f"{path.name}: {identity} has {len(points)} coordinates")
+            problems.append(f"{path.name}: {label(identity)} has {len(points)} coordinates")
     return values, coordinates, problems
 
 
 def check_institutions(report, run_dir, data_dir, reference_dir, geo_totals):
-    orgs, identity_problems, coordinates = {}, [], {}
+    """Returns institution values and institution-minus-geography multiplier gaps by agency and week."""
+    orgs, identity_problems, coordinates, gaps = {}, [], {}, {}
     for agency, suffix in AGENCIES.items():
         values, points, problems = load_orgs(run_dir / f"terminations_org{suffix}.csv")
         orgs[agency], coordinates[agency] = values, points
@@ -375,22 +451,26 @@ def check_institutions(report, run_dir, data_dir, reference_dir, geo_totals):
         report.add(f"{agency}_institution_series_validity", "error", collapse(series))
 
         totals = week_totals(values)
+        gaps[agency] = {
+            week: {name: measures[name] - geo_totals[agency][week][name] for name in MULTIPLIER_MEASURES}
+            for week, measures in totals.items()
+        }
         conservation, multiplier = [], []
         for week, measures in sorted(totals.items()):
             for name in GEO_MEASURES:
                 left, right = measures[name], geo_totals[agency][week][name]
                 if not close(left, right):
                     target = conservation if name in BASE_MEASURES else multiplier
-                    target.append(f"{agency} {week} {name}: institutions {left:.2f} vs geography {right:.2f}")
+                    target.append(f"{agency} {week} {name}: institutions {amount(name, left)} vs geography {amount(name, right)}")
         # Base dollars must survive commuter allocation exactly.
         report.add(f"{agency}_allocation_conserves_dollars", "error", conservation)
-        report.add(f"{agency}_institution_multiplier_consistency", "warning", multiplier[-3:] if multiplier else [])
+        report.add(f"{agency}_institution_multiplier_consistency", "warning", multiplier[-LIST_LIMIT:])
 
     combined, combined_points, problems = {}, defaultdict(set), []
     for line, row in enumerate(rows(run_dir / "terminations_org_combined.csv"), 2):
         identity = tuple(row[name] for name in ORG_KEY)
         if (identity, row["week"]) in combined:
-            problems.append(f"terminations_org_combined.csv:{line} duplicate {identity} {row['week']}")
+            problems.append(f"terminations_org_combined.csv:{line} duplicate {label(identity)} {row['week']}")
         combined[(identity, row["week"])] = row
         combined_points[identity].add((round(float(row["lat"]), 5), round(float(row["lon"]), 5)))
     identity_problems += problems
@@ -400,14 +480,14 @@ def check_institutions(report, run_dir, data_dir, reference_dir, geo_totals):
     for key in set(combined) | set(orgs["nih"]) | set(orgs["nsf"]):
         row = combined.get(key)
         if row is None:
-            reconciliation.append(f"{key[0]} {key[1]}: missing from combined output")
+            reconciliation.append(f"{label(key[0])} {key[1]}: missing from combined output")
             continue
         for name in zero:
             nih = orgs["nih"].get(key, zero)[name]
             nsf = orgs["nsf"].get(key, zero)[name]
             parts = (float(row[f"{name}.nih"]), float(row[f"{name}.nsf"]), float(row[f"{name}.combined"]))
             if not (close(parts[0], nih, 0.01) and close(parts[1], nsf, 0.01) and close(parts[2], nih + nsf, 0.01)):
-                reconciliation.append(f"{key[0]} {key[1]} {name}: combined {parts} vs NIH {nih:.2f} + NSF {nsf:.2f}")
+                reconciliation.append(f"{label(key[0])} {key[1]} {name}: combined {amount(name, parts[2])} vs NIH {amount(name, nih)} + NSF {amount(name, nsf)}")
                 break
     report.add("institution_identity", "error", identity_problems)
     report.add("combined_institution_reconciliation", "error", reconciliation)
@@ -415,7 +495,7 @@ def check_institutions(report, run_dir, data_dir, reference_dir, geo_totals):
     conflicts = []
     for identity in set(coordinates["nih"]) & set(coordinates["nsf"]):
         if coordinates["nih"][identity] != coordinates["nsf"][identity]:
-            conflicts.append(f"{identity}: NIH {sorted(coordinates['nih'][identity])} vs NSF {sorted(coordinates['nsf'][identity])}")
+            conflicts.append(f"{label(identity)}: NIH {sorted(coordinates['nih'][identity])} vs NSF {sorted(coordinates['nsf'][identity])}")
     names = defaultdict(set)
     for identity in combined_points:
         names[identity[0]].add(identity[1:])
@@ -427,6 +507,7 @@ def check_institutions(report, run_dir, data_dir, reference_dir, geo_totals):
         known = {tuple(row[name] for name in ORG_KEY) for row in rows(reference_dir / "terminations_org_combined.csv")}
         new = sorted(identity for identity in combined_points if identity not in known)
         report.add("new_institutions", "info", [" | ".join(identity) for identity in new], count=len(new))
+    return orgs, gaps
 
 
 def check_nih_locations(report, source_dir, data_dir, clean_path, as_of):
@@ -453,9 +534,10 @@ def check_nih_locations(report, source_dir, data_dir, clean_path, as_of):
         loss = max(number(row["obligated_at_disruption"]) - number(row["spent_at_disruption"]), 0.0)
         eligible[key] = (row["org_name"], row["org_state"], loss)
 
-    matched, conflicts = set(), defaultdict(float)
+    matched, conflicts, institution_loss = set(), defaultdict(float), defaultdict(float)
     for row in rows(clean_path):
         matched.add((row["grant_id"], row["full_award_number"], row["subgrant_id"] if row["subgrant_id"] not in MISSING else ""))
+        institution_loss[(row["org_name"], row["org_state"])] += number(row["current_loss"])
         tract_state = by_fips.get(row["tractid"][:2].zfill(2)) if row["tractid"] not in MISSING else None
         if tract_state and tract_state != row["org_state"]:
             conflicts[(row["org_name"], row["org_state"], tract_state)] += number(row["current_loss"])
@@ -479,6 +561,13 @@ def check_nih_locations(report, source_dir, data_dir, clean_path, as_of):
         "nih_institution_tract_state_conflicts",
         "warning",
         [f"{name}: institution {org} vs tract {tract} (${loss:,.2f} at disruption)" for (name, org, tract), loss in sorted(conflicts.items())],
+        # Whole institutions mapped to another state; partial conflicts cannot be reconciled from institution totals.
+        relocated=[
+            {"org_name": name, "org_state": org, "tract_state": tract}
+            for (name, org, tract), loss in sorted(conflicts.items())
+            if close(loss, institution_loss[(name, org)], 0.01)
+        ],
+        partial=len([1 for (name, org, _), loss in conflicts.items() if not close(loss, institution_loss[(name, org)], 0.01)]),
     )
 
 
@@ -499,19 +588,58 @@ def check_drift(report, run_dir, reference_dir, geo_totals):
     report.add("drift_from_reference", "warning", large, totals=drift, provisional_limit=TOTAL_DRIFT_LIMIT)
 
 
-def validate_run(run_dir, data_dir, source_dir, as_of, reference_dir=None):
+def validate_run(run_dir, data_dir, source_dir, as_of, reference_dir=None, source_baseline=None):
     run_dir, data_dir, source_dir = Path(run_dir), Path(data_dir), Path(source_dir)
     reference_dir = Path(reference_dir) if reference_dir else None
+    source_baseline = Path(source_baseline) if source_baseline else None
     clean_path = run_dir / "nih_terminations_clean.csv"
     report = Report()
-    sources = check_sources(report, source_dir, reference_dir and data_dir, as_of)
+    sources = check_sources(report, source_dir, reference_dir and data_dir, as_of, source_baseline)
     check_dictionaries(report, data_dir, clean_path)
     geo_totals = check_geography(report, run_dir, data_dir, as_of)
-    check_institutions(report, run_dir, data_dir, reference_dir, geo_totals)
+    orgs, gaps = check_institutions(report, run_dir, data_dir, reference_dir, geo_totals)
     if sources["nih_v3_terminations.csv"]["schema_valid"]:
         check_nih_locations(report, source_dir, data_dir, clean_path, as_of)
     check_drift(report, run_dir, reference_dir, geo_totals)
+    explain_multiplier_differences(report, orgs["nih"], gaps["nih"], data_dir)
     return report.result()
+
+
+def explain_multiplier_differences(report, nih_orgs, nih_gaps, data_dir):
+    """Institutions use the listed state's multipliers and maps use the tract state's. When every
+    week's institution-minus-map gap equals what the state conflicts imply, report the difference
+    once, as the conflict; any remainder stays a warning."""
+    conflicts = report.get("nih_institution_tract_state_conflicts")
+    multiplier = report.get("nih_institution_multiplier_consistency")
+    if not (conflicts and multiplier and conflicts["status"] == "warning" and multiplier["status"] == "warning"):
+        return
+    if conflicts["partial"]:
+        multiplier["explanation"] = "not reconciled: some institutions are only partly mapped to another state"
+        return
+    states = {row["state"]: row for row in rows(data_dir / "states.csv")}
+    relocated = {(item["org_name"], item["org_state"]): item["tract_state"] for item in conflicts["relocated"]}
+    expected = defaultdict(lambda: dict.fromkeys(MULTIPLIER_MEASURES, 0.0))
+    for (identity, week), measures in nih_orgs.items():
+        tract_state = relocated.get((identity[0], identity[2]))
+        if not tract_state:
+            continue
+        for name in MULTIPLIER_MEASURES:
+            factor = "econ_mult" if "econ" in name else "job_val"
+            base = "current_loss" if name.startswith("current") else "overall_loss"
+            difference = float(states[identity[2]][factor]) - float(states[tract_state][factor])
+            expected[week][name] += measures[base] * difference
+    unexplained = [
+        f"nih {week} {name}: {amount(name, gap - expected[week][name])} beyond the state conflicts"
+        for week, week_gaps in sorted(nih_gaps.items())
+        for name, gap in week_gaps.items()
+        if not close(gap, expected[week][name])
+    ]
+    if unexplained:
+        multiplier["problems"], multiplier["problem_count"] = unexplained[-LIST_LIMIT:], len(unexplained)
+        multiplier["explanation"] = "partly explained by state conflicts"
+        return
+    multiplier["status"] = "info"
+    multiplier["explained_by"] = conflicts["name"]
 
 
 def main():
@@ -521,17 +649,18 @@ def main():
     parser.add_argument("--data-dir", default=Path(__file__).resolve().parent.parent / "data")
     parser.add_argument("--source-dir", help="Raw Grant Witness files (default: --data-dir)")
     parser.add_argument("--reference-output", help="Approved output directory for drift and new institutions")
+    parser.add_argument("--source-baseline", help="Approved raw Grant Witness snapshot for column changes")
     parser.add_argument("--report", help="Write the validation report as JSON")
     args = parser.parse_args()
     result = validate_run(
         args.run_dir, args.data_dir, args.source_dir or args.data_dir,
-        date.fromisoformat(args.as_of), args.reference_output,
+        date.fromisoformat(args.as_of), args.reference_output, args.source_baseline,
     )
     if args.report:
         Path(args.report).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     for check in result["checks"]:
         if check["status"] != "passed":
-            print(f"[{check['status']}] {check['name']}: {check['problem_count']} problem(s)")
+            print(f"[{check['status']}] {check['title']} ({check['name']}): {check['problem_count']} problem(s)")
             for problem in check["problems"][:5]:
                 print(f"    {problem}")
     print(f"Validation {result['status']}: {len(result['errors'])} error(s), {len(result['warnings'])} warning(s)")
