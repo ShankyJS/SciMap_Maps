@@ -12,6 +12,8 @@ import shutil
 import subprocess
 import tempfile
 
+from validate_termination_outputs import validate_run
+
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DATA_FILES = ("nih_v3_terminations.csv", "nsf_terminations.csv")
 REFERENCE_DATA_FILES = (
@@ -202,6 +204,12 @@ def parse_args():
     parser.add_argument("--data-dir", default=ROOT / "data")
     parser.add_argument("--nsf-data-dir", default=ROOT / "nsf_data")
     parser.add_argument("--rscript", default="Rscript")
+    parser.add_argument(
+        "--validation",
+        choices=("enforce", "report"),
+        default="enforce",
+        help="enforce fails the run on scientific/geographic validation errors; report only records them",
+    )
     parser.add_argument("--absolute-tolerance", type=float, default=0.01)
     parser.add_argument("--relative-tolerance", type=float, default=1e-9)
     return parser.parse_args()
@@ -287,8 +295,13 @@ def main():
                 args.comparison_mode,
             )
 
+        validation = validate_run(
+            generated, data_dir, source_snapshot, date.fromisoformat(args.as_of), reference_output
+        )
+        failed = args.validation == "enforce" and validation["status"] != "passed"
         report = {
-            "status": "passed",
+            "status": "failed" if failed else "passed",
+            "validation": {"mode": args.validation, **validation},
             "as_of": args.as_of,
             "code": git_state(),
             "inputs": source_records,
@@ -304,6 +317,10 @@ def main():
         (generated / "run-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
         shutil.move(generated, output)
 
+    if failed:
+        raise SystemExit(
+            f"Validation failed ({', '.join(validation['errors'])}); see {output / 'run-report.json'}"
+        )
     print(f"Reproducible termination run created: {output}")
 
 

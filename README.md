@@ -39,6 +39,14 @@ The command refuses to overwrite its output. A successful run writes the generat
 
 For a new-data candidate, pass the immutable directory created by the capture command with `--source-snapshot`, and add `--comparison-mode report`. Report mode still enforces schemas, finite values, unique generated keys, input integrity and package locks, but records expected scientific changes from the prior approved output instead of requiring identical values.
 
+Every run then applies `scripts/validate_termination_outputs.py` and stores the result under `validation` in `run-report.json`. Errors fail the run and block publication: source schema, grants duplicated by dictionary joins, a common reporting week, complete non-negative weekly series where overall loss never falls, state/county/district/city reconciliation, dollar conservation through commuter allocation, unique institution identities, and Combined = NIH + NSF. Warnings record unmatched locations (an error above a provisional 1% of dollars), institution/tract state conflicts, duplicate dictionary keys and drift from the approved output; freshness reports NIH and NSF separately, including whether the required data actually changed. Use `--validation report` only for regression replays of a fixture with known, accepted errors. The validator also runs on an existing run directory:
+
+```bash
+python3 scripts/validate_termination_outputs.py /tmp/termination-run \
+  --as-of 2026-10-19 --source-dir /path/to/snapshots/<snapshot-id> \
+  --reference-output output --report /tmp/validation.json
+```
+
 ## Project Structure
 ```
 ├── data/                               # Raw data
