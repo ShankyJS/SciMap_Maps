@@ -63,9 +63,6 @@ def build_fixture(root):
         "grant_id": "1", "full_award_number": "1R01", "subgrant_id": "", "org_name": "Example University",
         "org_state": "CA", "tractid": "06001400100", "current_loss": "150",
     }])
-    write(run / "nsf_terminations_clean.csv", [
-        {"grant_id": "2", "date_status": "termination_date", "org_name": "Example University"},
-    ])
 
     for suffix in ("", "_nsf"):
         for name, key in (("state", {"state": "CA"}), ("county", {"FIPS": "06001"}),
@@ -74,6 +71,9 @@ def build_fixture(root):
         write(run / f"terminations_org{suffix}.csv", [
             {**ORG, "week": week, **SERIES[week], "current_grant_loss": 1, "overall_grant_loss": 1} for week in WEEKS
         ])
+    write(run / "nsf_terminations_clean.csv", [
+        {"grant_id": "2", "date_status": "termination_date", "org_name": "Example University"},
+    ])
     combined = []
     for week in WEEKS:
         row = {**ORG, "week": week}
@@ -179,6 +179,25 @@ class ValidationTests(unittest.TestCase):
     def test_missing_per_grant_rows_fail(self):
         (self.run_dir / "nsf_terminations_clean.csv").unlink()
         self.assert_fails("nsf_grant_rows_unique_after_joins")
+
+    def test_non_numeric_institution_value_is_reported(self):
+        rewrite(self.run_dir / "terminations_org.csv", lambda row: row.update(current_loss="NA"))
+        self.assert_fails("institution_identity")
+
+    def test_missing_spent_amount_counts_as_zero_loss(self):
+        rewrite(self.source / "nih_v3_terminations.csv", lambda row: row.update(spent_at_disruption="NA", grant_id="9"))
+        check = next(c for c in self.validate()["checks"] if c["name"] == "nih_unmatched_locations")
+        self.assertEqual(check["unmatched_loss"], 0.0)
+
+    def test_drift_without_common_week_is_reported(self):
+        reference = Path(self.directory.name) / "reference"
+        reference.mkdir()
+        for suffix in ("", "_nsf"):
+            write(reference / f"terminations_state{suffix}.csv", [{"state": "CA", "week": "2020-01-03", **SERIES[WEEKS[0]]}])
+        report = VALIDATOR.Report()
+        geo = {"nih": {WEEKS[0]: SERIES[WEEKS[0]]}, "nsf": {WEEKS[0]: SERIES[WEEKS[0]]}}
+        VALIDATOR.check_drift(report, self.run_dir, reference, geo)
+        self.assertIn("nih: no week in common with the approved run", report.get("drift_from_reference")["problems"])
 
     def test_stale_reporting_week_fails(self):
         result = VALIDATOR.validate_run(self.run_dir, self.data, self.source, date(2026, 10, 26))

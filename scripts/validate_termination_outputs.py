@@ -231,7 +231,7 @@ def series_checks(name, values, weeks):
             if measures["current_loss"] > measures["overall_loss"] + 1e-6:
                 problems.append(f"{name} {label(key)} {week}: current_loss exceeds overall_loss")
             if previous and any(
-                measures[m] < previous[m] - 1e-6 for m in ("overall_loss", "overall_econ_loss")
+                measures[m] < previous[m] - 1e-6 for m in ("overall_loss", "overall_econ_loss", "overall_job_loss")
             ):
                 problems.append(f"{name} {label(key)} {week}: overall loss decreased")
             previous = measures
@@ -363,7 +363,9 @@ def check_dictionaries(report, data_dir, clean_path):
         for row in rows(clean_path):
             counts[(row["grant_id"], row["full_award_number"], row["subgrant_id"])] += 1
         duplicated = [f"NIH grant {key[1] or key[0]} appears {n} times after joins" for key, n in counts.items() if n > 1]
-        report.add("grant_rows_unique_after_joins", "error", duplicated)
+    else:
+        duplicated = [f"missing {clean_path.name}"]
+    report.add("grant_rows_unique_after_joins", "error", duplicated)
 
     # NSF rows are one per grant event (termination or reinstatement) after the address join.
     nsf_path = clean_path.with_name("nsf_terminations_clean.csv")
@@ -447,9 +449,13 @@ def load_orgs(path, suffix=""):
         identity = tuple(row[name] for name in ORG_KEY)
         if (identity, row["week"]) in values:
             problems.append(f"{path.name}:{line} duplicate institution/week {label(identity)} {row['week']}")
-        values[(identity, row["week"])] = {
-            name: float(row[name + suffix]) for name in GEO_MEASURES + ("current_grant_loss", "overall_grant_loss")
-        }
+        try:
+            values[(identity, row["week"])] = {
+                name: float(row[name + suffix]) for name in GEO_MEASURES + ("current_grant_loss", "overall_grant_loss")
+            }
+        except ValueError:
+            problems.append(f"{path.name}:{line} non-numeric value for {label(identity)} {row['week']}")
+            continue
         coordinates[identity].add((round(float(row["lat"]), 5), round(float(row["lon"]), 5)))
     for identity, points in coordinates.items():
         if len(points) > 1:
@@ -533,7 +539,11 @@ def check_nih_locations(report, source_dir, data_dir, clean_path, as_of):
         return
     states = {row["state"]: row for row in rows(data_dir / "states.csv")}
     by_fips = {row["state_FIPS"].zfill(2): row["state"] for row in states.values()}
-    raw = [row for row in rows(source_dir / "nih_v3_terminations.csv")]
+    raw = [
+        row for row in rows(source_dir / "nih_v3_terminations.csv")
+        if row["org_state"] in states and row["org_country"] == "UNITED STATES"
+    ]
+    # The notebook drops a subgrant only when its parent award survives the state/country filter.
     with_parent = {row["grant_id"] for row in raw if row["subgrant_id"] in MISSING}
     eligible, seen = {}, set()
     for row in raw:
@@ -541,14 +551,14 @@ def check_nih_locations(report, source_dir, data_dir, clean_path, as_of):
         if key in seen:
             continue
         seen.add(key)
-        if row["org_state"] not in states or row["org_country"] != "UNITED STATES":
-            continue
         if row["subgrant_id"] not in MISSING and row["grant_id"] in with_parent:
             continue
         impacts = [d for d in (parse_date(row["first_termination_date"]), parse_date(row["frozen_date"])) if d]
         if not impacts or min(impacts) < START_DATE:
             continue
-        loss = max(number(row["obligated_at_disruption"]) - number(row["spent_at_disruption"]), 0.0)
+        amounts = (row["obligated_at_disruption"], row["spent_at_disruption"])
+        # As in the notebook, a missing amount makes the loss NA, counted as zero.
+        loss = 0.0 if any(value in MISSING for value in amounts) else max(number(amounts[0]) - number(amounts[1]), 0.0)
         eligible[key] = (row["org_name"], row["org_state"], loss)
 
     matched, conflicts, institution_loss = set(), defaultdict(float), defaultdict(float)
@@ -594,7 +604,11 @@ def check_drift(report, run_dir, reference_dir, geo_totals):
     drift, large = {}, []
     for agency, suffix in AGENCIES.items():
         previous = week_totals(load_level(reference_dir / f"terminations_state{suffix}.csv", ("state",))[0])
-        common = max(set(previous) & set(geo_totals[agency]))
+        overlap = set(previous) & set(geo_totals[agency])
+        if not overlap:
+            large.append(f"{agency}: no week in common with the approved run")
+            continue
+        common = max(overlap)
         drift[agency] = {"week": common}
         for name in GEO_MEASURES:
             old, new = previous[common][name], geo_totals[agency][common][name]
