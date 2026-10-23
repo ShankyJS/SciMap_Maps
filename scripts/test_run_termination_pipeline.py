@@ -2,8 +2,10 @@ import csv
 import importlib.util
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 
+sys.path.insert(0, str(Path(__file__).parent))
 MODULE_PATH = Path(__file__).with_name("run_termination_pipeline.py")
 SPEC = importlib.util.spec_from_file_location("run_termination_pipeline", MODULE_PATH)
 PIPELINE = importlib.util.module_from_spec(SPEC)

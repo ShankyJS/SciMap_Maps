@@ -2,8 +2,10 @@ import csv
 import importlib.util
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 
+sys.path.insert(0, str(Path(__file__).parent))
 MODULE_PATH = Path(__file__).with_name("capture_termination_sources.py")
 SPEC = importlib.util.spec_from_file_location("capture_termination_sources", MODULE_PATH)
 CAPTURE = importlib.util.module_from_spec(SPEC)

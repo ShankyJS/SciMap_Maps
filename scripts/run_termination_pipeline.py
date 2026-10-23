@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 
+import alerts
 from validate_termination_outputs import validate_run
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -216,11 +217,15 @@ def parse_args():
     )
     parser.add_argument("--absolute-tolerance", type=float, default=0.01)
     parser.add_argument("--relative-tolerance", type=float, default=1e-9)
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        help=f"post failures and validation warnings to Slack via ${alerts.WEBHOOK_ENV}",
+    )
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
+def run_pipeline(args):
     try:
         date.fromisoformat(args.as_of)
     except ValueError as error:
@@ -324,8 +329,23 @@ def main():
         }
         (generated / "run-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
         shutil.move(generated, output)
+    return output, report
 
-    if failed:
+
+def main():
+    args = parse_args()
+    webhook = alerts.webhook_from_env() if args.notify else None
+    alerts.raise_on_sigterm()
+    context = {"as of": args.as_of, "output": Path(args.output).name}
+    try:
+        output, report = run_pipeline(args)
+    except (Exception, SystemExit, KeyboardInterrupt) as error:
+        alerts.send(webhook, alerts.run_failed("Termination run", error, context))
+        raise
+    validation = report["validation"]
+    context["revision"] = report["code"].get("revision", "")[:12]
+    alerts.send(webhook, alerts.validation_alert(validation, context, blocked=report["status"] == "failed"))
+    if report["status"] == "failed":
         raise SystemExit(
             f"Validation failed ({', '.join(validation['errors'])}); see {output / 'run-report.json'}"
         )

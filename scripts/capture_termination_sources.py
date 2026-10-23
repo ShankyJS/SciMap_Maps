@@ -13,6 +13,8 @@ import time
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+import alerts
+
 SOURCES = {
     "nih_v3_terminations.csv": {
         "url": "https://files.grant-witness.us/nih_v3_terminations.csv",
@@ -66,11 +68,15 @@ def parse_args():
     parser.add_argument("--nih-url", default=SOURCES["nih_v3_terminations.csv"]["url"])
     parser.add_argument("--nsf-url", default=SOURCES["nsf_terminations.csv"]["url"])
     parser.add_argument("--attempts", type=int, default=3)
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        help=f"post download and schema failures to Slack via ${alerts.WEBHOOK_ENV}",
+    )
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
+def capture(args):
     output = Path(args.output).resolve()
     if output.exists():
         raise SystemExit(f"Refusing to overwrite snapshot: {output}")
@@ -102,6 +108,18 @@ def main():
         }
         (snapshot / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         shutil.move(snapshot, output)
+    return output
+
+
+def main():
+    args = parse_args()
+    webhook = alerts.webhook_from_env() if args.notify else None
+    alerts.raise_on_sigterm()
+    try:
+        output = capture(args)
+    except (Exception, SystemExit, KeyboardInterrupt) as error:
+        alerts.send(webhook, alerts.run_failed("Grant Witness capture", error, {"snapshot": Path(args.output).name}))
+        raise
     print(f"Source snapshot created: {output}")
 
 

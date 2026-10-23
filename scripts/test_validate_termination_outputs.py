@@ -220,16 +220,17 @@ class ValidationTests(unittest.TestCase):
             with (self.source / name).open(newline="") as source:
                 write(target / name, list(csv.DictReader(source)))
 
-    def test_added_source_column_warns(self):
+    def test_added_source_column_warns_and_alerts(self):
+        import alerts
         baseline = Path(self.directory.name) / "approved-snapshot"
         self.copy_sources(baseline)
         rewrite(self.source / "nih_v3_terminations.csv", lambda row: row.update(new_column="x"))
         result = VALIDATOR.validate_run(self.run_dir, self.data, self.source, AS_OF, self.run_dir, baseline)
         self.assertEqual(result["status"], "passed", result["errors"])
         self.assertEqual(result["warnings"], ["source_schema_drift:nih_v3_terminations.csv"])
-        check = next(check for check in result["checks"] if check["name"] == result["warnings"][0])
-        self.assertEqual(check["title"], "NIH Grant Witness file: columns changed")
-        self.assertIn("column added new_column", check["problems"][0])
+        text = alerts.validation_alert(result, {}, blocked=False)
+        self.assertIn("NIH Grant Witness file: columns changed", text)
+        self.assertIn("column added new_column", text)
 
     def test_repository_copies_are_not_a_column_baseline(self):
         self.copy_sources(self.data)
