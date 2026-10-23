@@ -63,6 +63,9 @@ def build_fixture(root):
         "grant_id": "1", "full_award_number": "1R01", "subgrant_id": "", "org_name": "Example University",
         "org_state": "CA", "tractid": "06001400100", "current_loss": "150",
     }])
+    write(run / "nsf_terminations_clean.csv", [
+        {"grant_id": "2", "date_status": "termination_date", "org_name": "Example University"},
+    ])
 
     for suffix in ("", "_nsf"):
         for name, key in (("state", {"state": "CA"}), ("county", {"FIPS": "06001"}),
@@ -163,6 +166,19 @@ class ValidationTests(unittest.TestCase):
             rows = list(csv.DictReader(source))
         write(path, rows + [{**rows[0], "tractid": "06001400200"}])
         self.assert_fails("grant_rows_unique_after_joins")
+
+    def test_nsf_grant_duplicated_by_address_join_fails(self):
+        path = self.run_dir / "nsf_terminations_clean.csv"
+        with path.open(newline="") as source:
+            rows = list(csv.DictReader(source))
+        write(path, rows + rows)
+        self.assert_fails("nsf_grant_rows_unique_after_joins")
+        check = next(c for c in self.validate()["checks"] if c["name"] == "nsf_grant_rows_unique_after_joins")
+        self.assertEqual(check["problems"], ["NSF grant 2 (Example University) termination appears 2 times after joins"])
+
+    def test_missing_per_grant_rows_fail(self):
+        (self.run_dir / "nsf_terminations_clean.csv").unlink()
+        self.assert_fails("nsf_grant_rows_unique_after_joins")
 
     def test_stale_reporting_week_fails(self):
         result = VALIDATOR.validate_run(self.run_dir, self.data, self.source, date(2026, 10, 26))

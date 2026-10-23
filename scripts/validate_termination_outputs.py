@@ -109,6 +109,7 @@ TITLES = {
     "source_freshness": "Grant Witness freshness",
     "dictionary_duplicate_keys": "Dictionaries: duplicate names (unused)",
     "grant_rows_unique_after_joins": "NIH grants counted more than once by the location lookup",
+    "nsf_grant_rows_unique_after_joins": "NSF grants counted more than once by the institution or address lookup",
     "common_reporting_week": "Reporting week",
     "output_structure": "{} outputs: malformed rows",
     "series_validity": "{} maps: negative, incomplete or falling weekly losses",
@@ -363,6 +364,22 @@ def check_dictionaries(report, data_dir, clean_path):
             counts[(row["grant_id"], row["full_award_number"], row["subgrant_id"])] += 1
         duplicated = [f"NIH grant {key[1] or key[0]} appears {n} times after joins" for key, n in counts.items() if n > 1]
         report.add("grant_rows_unique_after_joins", "error", duplicated)
+
+    # NSF rows are one per grant event (termination or reinstatement) after the address join.
+    nsf_path = clean_path.with_name("nsf_terminations_clean.csv")
+    if nsf_path.is_file():
+        counts, names = defaultdict(int), {}
+        for row in rows(nsf_path):
+            key = (row["grant_id"], row["date_status"])
+            counts[key] += 1
+            names[key] = row["org_name"]
+        duplicated = sorted(
+            f"NSF grant {grant} ({names[(grant, status)]}) {status.replace('_date', '')} appears {n} times after joins"
+            for (grant, status), n in counts.items() if n > 1
+        )
+    else:
+        duplicated = [f"missing {nsf_path.name}"]
+    report.add("nsf_grant_rows_unique_after_joins", "error", duplicated)
 
 
 def check_geography(report, run_dir, data_dir, as_of):

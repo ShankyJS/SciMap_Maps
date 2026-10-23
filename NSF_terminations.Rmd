@@ -204,6 +204,9 @@ nsf_terminations_clean <- nsf_terminations_clean %>%
          lon = if_else(is.na(lon), lon.nsf, lon)) %>%
   select(-ends_with(".nih"), -ends_with(".nsf"))
 
+# Per-grant event rows after every join, for validation (mirrors nih_terminations_clean.csv)
+write_csv(nsf_terminations_clean, output_path("nsf_terminations_clean.csv"))
+
 # organization level
 terminations_org_nsf <- nsf_terminations_clean %>%
   complete(nesting(org_name, org_city, org_state, lat, lon), 
