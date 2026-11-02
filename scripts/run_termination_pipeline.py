@@ -312,8 +312,11 @@ def run_pipeline(args):
             args.source_baseline and Path(args.source_baseline).resolve(),
         )
         failed = args.validation == "enforce" and validation["status"] != "passed"
+        # Fingerprint every output so a release can prove it packaged exactly the validated files.
+        outputs = {path.name: file_record(path) for path in sorted(generated.glob("*.csv"))}
         report = {
             "status": "failed" if failed else "passed",
+            "outputs": outputs,
             "validation": {"mode": args.validation, **validation},
             "as_of": args.as_of,
             "code": git_state(),

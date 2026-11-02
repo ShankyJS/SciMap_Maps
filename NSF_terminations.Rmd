@@ -44,12 +44,12 @@ nsf_grants <- read.csv(nsf_data_path("nsf_grants.csv"))
 states <- read.csv(data_path("states.csv")) %>%
   mutate(state_FIPS = str_pad(state_FIPS, 2, pad = "0"))
 
-orgs <- nsf_grants %>% 
-  distinct(inst_name, inst_city_name, inst_state_name, inst_street_address) %>% 
-  rename(org_name = inst_name, 
-         org_city = inst_city_name, 
-         state_name = inst_state_name) %>% 
-  left_join(states %>% rename(org_state = state)) %>% 
+orgs <- nsf_grants %>%
+  distinct(inst_name, inst_city_name, inst_state_name, inst_street_address) %>%
+  rename(org_name = inst_name,
+         org_city = inst_city_name,
+         state_name = inst_state_name) %>%
+  left_join(states %>% rename(org_state = state)) %>%
   mutate(org_name = if_else(org_name == "Carnegie-Mellon University", "Carnegie Mellon University", org_name),
          org_name = if_else(org_name == "Manhattan College", "MANHATTAN UNIVERSITY", org_name),
          org_name = if_else(org_name == "OHIO STATE UNIVERSITY, THE", "Ohio State University", org_name),
@@ -67,7 +67,7 @@ nsf_terminations <- nsf_terminations %>%
          org_city = if_else(org_name == "University of Colorado at Boulder", "BOULDER", org_city),
          org_city = if_else(org_name == "Arizona State University", "TEMPE", org_city),
          org_city = str_to_upper(org_city)) %>%
-  left_join(orgs) %>% 
+  left_join(orgs) %>%
   filter(org_state %in% c(state.abb, "DC", "AS", "GU", "MP", "PR", "VI"))
 
 #directorates to include
@@ -86,7 +86,7 @@ geo_dict <- read.csv(nsf_data_path("NSF_addresses_US_tract_county_cong119.csv"))
          lat = round(lat, 5),
          lon = round(lon, 5))
 
-nsf_terminations %<>% 
+nsf_terminations %<>%
   left_join(geo_dict) %>%
   select(-c(inst_street_address)) %>%
   distinct()
@@ -94,14 +94,14 @@ nsf_terminations %<>%
 nsf_terminations %>% filter(is.na(tractid))
 
 # check for duplicates
-nsf_terminations %>% 
-  group_by(grant_id) %>% 
+nsf_terminations %>%
+  group_by(grant_id) %>%
   filter(n() > 1)
 ```
 
 ```{r}
 county_commute <- read.csv(params$county_commute) %>%
-  select(DESTINATION, DESTINATION_total_workers, Commuters, ORIGIN, proportion) %>% 
+  select(DESTINATION, DESTINATION_total_workers, Commuters, ORIGIN, proportion) %>%
   mutate(DESTINATION = str_pad(DESTINATION, 11, pad = "0"),
          ORIGIN = str_pad(ORIGIN, 5, pad = "0"))
 
@@ -166,16 +166,16 @@ nsf_terminations %>%
 nsf_terminations %<>%
   filter(termination_date >= start_date) %>%
   mutate(reinstatement_date = if_else(reinstatement_date < termination_date, NA, reinstatement_date)) %>%
-  pivot_longer(c(termination_date, reinstatement_date), names_to = "date_status", values_to = "date") %>% 
+  pivot_longer(c(termination_date, reinstatement_date), names_to = "date_status", values_to = "date") %>%
   filter(!is.na(date), date <= as_of) %>%
   mutate(total_loss = estimated_budget - estimated_outlays,
-         total_loss = if_else(total_loss < 0, 0, total_loss), 
+         total_loss = if_else(total_loss < 0, 0, total_loss),
          total_loss = if_else(date_status == "reinstatement_date", -total_loss, total_loss), # total amount lost at the moment
          total_impacted = if_else(total_loss < 0, 0, total_loss), # total amount ever impacted
          grant_loss = if_else(date_status == "termination_date", 1, -1),
          grants_impacted = if_else(grant_loss < 0, 0, grant_loss),
-         week = floor_date(date, 
-                           unit = "week", 
+         week = floor_date(date,
+                           unit = "week",
                            week_start = if_else(wday(start_date) == 1, 7, wday(start_date) - 1)))
 
 nsf_econ_mult <- 2.64
@@ -185,8 +185,8 @@ replacements <- c(" Of " = " of ", " At " = " at ", " And " = " and ", " In " = 
                   "Univ " = "University ", "Ctr" = "Center", " Inc$" = " Inc.",
                   "Col " = "College ", "Hlth" = "Health", "Scis" = "Sciences",
                   "Sci " = "Science ", "Llc" = "LLC", "Assn" = "Association",
-                  " The " = " the ", " For " = " for ", "Res " = "Research ", 
-                  "Hosp " = "Hospital ", "Med " = "Medical ", " Inst " = " Institute ", 
+                  " The " = " the ", " For " = " for ", "Res " = "Research ",
+                  "Hosp " = "Hospital ", "Med " = "Medical ", " Inst " = " Institute ",
                   " Can " = " Cancer ", "Cuny" = "CUNY", "Suny" = "SUNY")
 
 names_corrected <- read.csv(data_path("nsf_names_corrected.csv"))
@@ -205,7 +205,7 @@ org_dict <- read.csv(data_path("org_dict.csv")) %>%
 
 nsf_terminations_clean <- nsf_terminations_clean %>%
   rename_with(~ paste0(.x, ".nsf", recycle0 = TRUE), c("org_name", "org_state", "org_city", "lat", "lon")) %>%
-  left_join(org_dict %>% select(-ends_with(".nih"), -c(lat.nsf, lon.nsf)) %>% distinct()) %>% 
+  left_join(org_dict %>% select(-ends_with(".nih"), -c(lat.nsf, lon.nsf)) %>% distinct()) %>%
   mutate(org_name = if_else(is.na(org_name), org_name.nsf, org_name),
          org_city = if_else(is.na(org_city), org_city.nsf, org_city),
          org_state = if_else(is.na(org_state), org_state.nsf, org_state),
@@ -218,7 +218,7 @@ write_csv(nsf_terminations_clean, output_path("nsf_terminations_clean.csv"))
 
 # organization level
 terminations_org_nsf <- nsf_terminations_clean %>%
-  complete(nesting(org_name, org_city, org_state, lat, lon), 
+  complete(nesting(org_name, org_city, org_state, lat, lon),
            week = seq(start_date, reporting_week, by = "weeks"),
            fill = list(total_loss = 0, total_impacted = 0, grant_loss = 0, grants_impacted = 0)) %>%
   group_by(org_name, org_city, org_state, lat, lon, week) %>%

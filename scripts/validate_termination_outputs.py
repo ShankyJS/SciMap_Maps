@@ -71,7 +71,7 @@ MISSING = {"", "NA", "NaN", "nan"}
 TERRITORY_FIPS = {"60", "66", "69", "72", "78"}
 # Provisional thresholds (Q04): above these a warning becomes an error.
 UNMATCHED_SHARE_LIMIT = 0.01
-TOTAL_DRIFT_LIMIT = 0.10
+TOTAL_DRIFT_LIMIT = 0.001  # Joshua, 2026-10: nationwide totals moving more than 0.1% pause for review
 LIST_LIMIT = 20
 
 

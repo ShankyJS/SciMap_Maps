@@ -66,7 +66,10 @@ def warning_summary(validation):
 def message(level, title, context, lines=()):
     icon = {"error": ":rotating_light:", "warning": ":warning:"}[level]
     header = f"{icon} *{escape(title)}*"
-    details = " · ".join(f"{key}: `{escape(str(value).replace('`', "'"))}`" for key, value in context.items() if value)
+    details = " · ".join(
+        "{}: `{}`".format(key, escape(str(value).replace("`", "'")))
+        for key, value in context.items() if value
+    )
     url = ci_run_url()
     footer = f"<{url}|Open the run and its run-report.json>" if url else ""
     body = "\n".join([header, details, *lines]).strip()
