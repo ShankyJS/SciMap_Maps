@@ -34,8 +34,12 @@ inf_adj_budget <- NIH_budg *  inf_adj * 1000
 
 # establish baseline by comparison to FY2020-FY2024
 NIH_prior <- read.csv("data/NIH_grants.csv") %>%
-                filter(Fiscal.Year >= 2020 & Fiscal.Year <=2024) %>%
-                mutate(Latitude = round(Latitude, 5), Longitude = round(Longitude, 5))
+  filter(Fiscal.Year >= 2020 & Fiscal.Year <=2024) %>%
+  mutate(Latitude = round(Latitude, 5), Longitude = round(Longitude, 5),
+         Organization.City = if_else(Organization.Name == "COLLIGA APPS CORP.", "MIAMI", Organization.City),
+         Organization.State = if_else(Organization.Name == "COLLIGA APPS CORP.", "FL", Organization.State),
+         Organization.State = if_else(Organization.Name == "WHITMAN-WALKER INSTITUTE, INC.", "DC", Organization.State))
+
 # define ICs in NIH
 ic_list <- c("NIAID", "NICHD", "NHLBI", "NCI", "OD", "NIDCR", "NINDS", "NIBIB", "NIGMS", 
              "NEI", "NIDA", "NIDDK", "NHGRI", "NIAAA", "NCATS", "NIEHS", "NIA", "NIMH",

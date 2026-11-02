@@ -86,9 +86,17 @@ geo_dict <- read.csv(nsf_data_path("NSF_addresses_US_tract_county_cong119.csv"))
          lat = round(lat, 5),
          lon = round(lon, 5))
 
-nsf_terminations %<>% left_join(geo_dict)
+nsf_terminations %<>% 
+  left_join(geo_dict) %>%
+  select(-c(inst_street_address)) %>%
+  distinct()
 
 nsf_terminations %>% filter(is.na(tractid))
+
+# check for duplicates
+nsf_terminations %>% 
+  group_by(grant_id) %>% 
+  filter(n() > 1)
 ```
 
 ```{r}
@@ -157,6 +165,7 @@ nsf_terminations %>%
 
 nsf_terminations %<>%
   filter(termination_date >= start_date) %>%
+  mutate(reinstatement_date = if_else(reinstatement_date < termination_date, NA, reinstatement_date)) %>%
   pivot_longer(c(termination_date, reinstatement_date), names_to = "date_status", values_to = "date") %>% 
   filter(!is.na(date), date <= as_of) %>%
   mutate(total_loss = estimated_budget - estimated_outlays,
