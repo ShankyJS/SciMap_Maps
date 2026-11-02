@@ -142,3 +142,13 @@ The following two files are too large to post to Github and are therefore stored
 home\_119\_workTR: commuter flows with Congressional District Cong\_ORIGIN and census tract Cong\_DESTINATION
 
 NIH\_raw: large file of active NIH grants for fiscal year 2024 downloaded from RePORTER
+
+## Scientific tooling CI
+
+`termination-validation.yml` runs the standard-library regression suite on pull requests and branch pushes with Python 3.12 and 3.13, retaining the verbose test log as a workflow artifact. It requires no credentials and sends no live Slack messages. Run locally with:
+
+```bash
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
+```
+
+This checks ingestion, comparisons, validation and alerts using fixtures and mocked network calls. It does not run the full R model or approve a dataset; the separate pinned-R offline run and `run-report.json` provide that evidence.
