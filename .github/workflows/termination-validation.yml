@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, work/s01-2-reproducible-scientific-run]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
