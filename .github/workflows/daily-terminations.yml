@@ -58,9 +58,9 @@ jobs:
         run: |
           python3 --version
           Rscript scripts/check_r_environment.R r-version.txt r-packages.lock.csv
-          tippecanoe --version
-          rclone version
-          python3 -c 'import pandas, geopandas; assert pandas.__version__ == "2.2.3"; assert geopandas.__version__ == "1.1.0"'
+          tippecanoe --version 2>&1 | grep -Fx 'tippecanoe v2.79.0'
+          rclone version | head -n 1 | grep -Fx 'rclone v1.75.1'
+          python3 -c 'import sys, pandas, geopandas; assert sys.version_info[:2] == (3, 12); assert pandas.__version__ == "2.2.3"; assert geopandas.__version__ == "1.1.0"'
       - name: Run daily candidate pipeline
         id: daily
         working-directory: analysis

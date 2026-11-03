@@ -10,7 +10,6 @@ from datetime import date, datetime, timezone
 import json
 import os
 from pathlib import Path
-import signal
 import subprocess
 import sys
 import uuid
@@ -95,6 +94,14 @@ def run(args, executor=execute):
                 step('latest', [args.release_python, scimap / 'scripts/select_termination_release.py', '--upload-record', upload_record,
                      '--pointer', 'latest-validated', '--apply', '--record', work / 'selection-record.json'], publish=True)
         report['status'] = 'passed'
+        outcome = 'Candidate published' if args.publish else 'Local candidate built; nothing uploaded'
+        url = alerts.ci_run_url()
+        alerts.send(webhook, '\n'.join(filter(None, [
+            f'{outcome}: {alerts.escape(release_id)}',
+            f'Report: {alerts.escape(str(report_path))}',
+            'Website selection was not changed.',
+            f'<{url}|Open run and reports>' if url else '',
+        ])))
     except BaseException as error:
         report['status'] = 'failed'
         report['failed_stage'] = stage

@@ -8,7 +8,7 @@ selection. Default execution is local only. `--publish` enables publication.
 
 Every stage has a log and `daily-report.json`. Failure blocks downstream stages.
 With `--notify`, the orchestrator posts actionable failures, scientific warnings
-and release-geometry warnings to the existing #scimap-alerts webhook. It includes
+and release-geometry warnings plus completion summaries to the existing #scimap-alerts webhook. It includes
 stage/run/report context and the end of the failing log, including institution
 names. It strips R2/AWS credentials from capture/science/build child environments;
 only publication/selection children inherit them. Webhook values are never printed
@@ -51,8 +51,8 @@ rclone. Provision the two approved commuter inputs under `SCIMAP_INPUT_ROOT`.
 The scientific runner checks their approved checksums. This avoids uploading the
 private county reference to a public release or pretending the unit-test runner
 contains the full scientific environment. Runner provisioning is not completed by
-committing a workflow. Pin/record the Tippecanoe and rclone versions in the accepted
-runner image before enablement; the local proven runtime remains the reference.
+committing a workflow. The workflow requires Tippecanoe 2.79.0 and rclone 1.75.1, matching the local
+proven tools; pin those in the accepted runner image before enablement.
 
 Configure the `scimap-candidates` GitHub environment with the existing R2 access
 and Slack webhook secrets: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
