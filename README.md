@@ -145,7 +145,7 @@ NIH\_raw: large file of active NIH grants for fiscal year 2024 downloaded from R
 
 ## Scientific tooling CI
 
-`termination-validation.yml` runs the standard-library regression suite on pull requests and branch pushes with Python 3.12 and 3.13, retaining the verbose test log as a workflow artifact. It requires no credentials and sends no live Slack messages. Run locally with:
+`termination-validation.yml` runs the standard-library regression suite on pull requests to main, pushes to main and manual dispatch with Python 3.12 and 3.13, retaining the verbose test log as a workflow artifact. It requires no credentials and sends no live Slack messages. Run locally with:
 
 ```bash
 python3 -m unittest discover -s scripts -p 'test_*.py' -v
