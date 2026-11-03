@@ -1,0 +1,115 @@
+name: Daily termination candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      as_of:
+        description: 'ISO cutoff (blank = current UTC date)'
+        type: string
+      publish:
+        description: 'Publish candidate and advance latest-validated (never website selection)'
+        type: boolean
+        default: false
+      historical:
+        description: 'Historical replay: never advance latest-validated'
+        type: boolean
+        default: false
+  schedule:
+    # Proposed UTC time; job stays off until the team enables SCIMAP_DAILY_ENABLED.
+    - cron: '15 13 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: termination-release-publication
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.event_name == 'workflow_dispatch' || vars.SCIMAP_DAILY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require configured runtime before queueing the private-input runner
+        env:
+          READY: ${{ vars.SCIMAP_RUNTIME_READY }}
+          INPUT_ROOT: ${{ vars.SCIMAP_INPUT_ROOT }}
+        run: |
+          test "$READY" = true || { echo 'Configure and verify the pinned runtime and operations ownership before enabling this workflow.'; exit 1; }
+          test -n "$INPUT_ROOT" || { echo 'SCIMAP_INPUT_ROOT must point to the approved runner references.'; exit 1; }
+  candidate:
+    needs: preflight
+    runs-on: [self-hosted, linux, x64, scimap]
+    timeout-minutes: 180
+    environment: scimap-candidates
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: analysis
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: clvcooke/scimap
+          ref: dd191eb22510908ca41bd908ee09547f1bd6b436
+          path: website
+          persist-credentials: false
+      - name: Check pinned runtime
+        working-directory: analysis
+        run: |
+          python3 --version
+          Rscript scripts/check_r_environment.R r-version.txt r-packages.lock.csv
+          tippecanoe --version
+          rclone version
+          python3 -c 'import pandas, geopandas; assert pandas.__version__ == "2.2.3"; assert geopandas.__version__ == "1.1.0"'
+      - name: Run daily candidate pipeline
+        id: daily
+        working-directory: analysis
+        env:
+          INPUT_ROOT: ${{ vars.SCIMAP_INPUT_ROOT }}
+          AS_OF: ${{ inputs.as_of }}
+          PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
+          HISTORICAL: ${{ inputs.historical }}
+          SCIMAP_ALERT_WEBHOOK_URL: ${{ secrets.SCIMAP_ALERT_WEBHOOK_URL }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: https://17067e7373bbfee2043fe5186d66aeb9.r2.cloudflarestorage.com
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff="${AS_OF:-$(date -u +%F)}"
+          flags=()
+          if [ "$PUBLISH" = true ]; then flags+=(--publish); fi
+          if [ "$HISTORICAL" = true ]; then flags+=(--historical); fi
+          python3 scripts/run_daily_terminations.py \
+            --scimap ../website --as-of "$cutoff" \
+            --county-commute "$INPUT_ROOT/county_commute_NIH.csv" \
+            --district-commute "$INPUT_ROOT/home_119_workTR.csv" \
+            --source-baseline data --reference-output output \
+            --output "$RUNNER_TEMP/termination-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --notify "${flags[@]}"
+      - name: Alert for runtime/setup failures before the orchestrator starts
+        if: failure() && steps.daily.outcome != 'failure'
+        working-directory: analysis
+        env:
+          SCIMAP_ALERT_WEBHOOK_URL: ${{ secrets.SCIMAP_ALERT_WEBHOOK_URL }}
+        run: |
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, 'scripts')
+          import alerts
+          alerts.send(alerts.webhook_from_env(), alerts.run_failed('Daily runtime setup', RuntimeError('See the failed setup step'), {}))
+          PY
+      - name: Retain logs, manifests, upload/selection evidence and validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: termination-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/termination-${{ github.run_id }}-${{ github.run_attempt }}/*.json
+            ${{ runner.temp }}/termination-${{ github.run_id }}-${{ github.run_attempt }}/*.log
+            ${{ runner.temp }}/termination-${{ github.run_id }}-${{ github.run_attempt }}/analysis/run-report.json
+            ${{ runner.temp }}/termination-${{ github.run_id }}-${{ github.run_attempt }}/release/manifest.json
+          if-no-files-found: warn
