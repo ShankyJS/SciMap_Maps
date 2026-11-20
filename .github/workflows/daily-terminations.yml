@@ -50,15 +50,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: clvcooke/scimap
-          ref: dd191eb22510908ca41bd908ee09547f1bd6b436
+          # Reviewed AWS CLI publisher on https://github.com/clvcooke/scimap/pull/49.
+          # Newest passing head that contains that publisher (scripts unchanged since c118efe).
+          ref: ca167515757a295df811d8a9df7a40b80a3c1f37
           path: website
           persist-credentials: false
       - name: Check pinned runtime
         working-directory: analysis
+        env:
+          AWS_PAGER: ''
+          AWS_CLI_AUTO_PROMPT: 'off'
         run: |
           python3 --version
           Rscript scripts/check_r_environment.R r-version.txt r-packages.lock.csv
           tippecanoe --version 2>&1 | grep -Fx 'tippecanoe v2.79.0'
+          # Publisher shells out to AWS CLI v2 with these flags. Reject an older CLI before any upload.
+          aws --version 2>&1 | grep -Eq '^aws-cli/2\.'
+          aws s3api put-object help | grep -q -- '--if-none-match'
+          aws s3api list-objects-v2 help | grep -q -- '--no-paginate'
+          # select_termination_release.py at this pin still calls rclone for pointer reads and writes.
           rclone version | head -n 1 | grep -Fx 'rclone v1.75.1'
           python3 -c 'import sys, pandas, geopandas; assert sys.version_info[:2] == (3, 12); assert pandas.__version__ == "2.2.3"; assert geopandas.__version__ == "1.1.0"'
       - name: Run daily candidate pipeline
@@ -70,12 +80,9 @@ jobs:
           PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
           HISTORICAL: ${{ inputs.historical }}
           SCIMAP_ALERT_WEBHOOK_URL: ${{ secrets.SCIMAP_ALERT_WEBHOOK_URL }}
-          RCLONE_CONFIG_R2_TYPE: s3
-          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
-          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          RCLONE_CONFIG_R2_ENDPOINT: https://17067e7373bbfee2043fe5186d66aeb9.r2.cloudflarestorage.com
-          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: 'true'
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: https://17067e7373bbfee2043fe5186d66aeb9.r2.cloudflarestorage.com
         shell: bash
         run: |
           set -euo pipefail

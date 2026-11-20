@@ -17,13 +17,72 @@ import uuid
 import alerts
 
 ROOT = Path(__file__).resolve().parent.parent
+# Names the AWS CLI publisher reads. RCLONE_CONFIG_R2_* is not an input.
+PUBLICATION_NAMES = ('R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT', 'R2_ACCOUNT_ID')
+
+
+def publication_settings():
+    """Return (missing names, access key, secret, endpoint) for the AWS CLI publisher.
+
+    The endpoint may be R2_ENDPOINT or derived from R2_ACCOUNT_ID, matching
+    publish_termination_release.py. Secret values are never included in errors.
+    """
+    access = os.environ.get('R2_ACCESS_KEY_ID', '').strip()
+    secret = os.environ.get('R2_SECRET_ACCESS_KEY', '').strip()
+    endpoint = os.environ.get('R2_ENDPOINT', '').strip()
+    account = os.environ.get('R2_ACCOUNT_ID', '').strip()
+    missing = []
+    if not access:
+        missing.append('R2_ACCESS_KEY_ID')
+    if not secret:
+        missing.append('R2_SECRET_ACCESS_KEY')
+    if not endpoint and not account:
+        missing.append('R2_ENDPOINT or R2_ACCOUNT_ID')
+    if not endpoint and account:
+        endpoint = f'https://{account}.r2.cloudflarestorage.com'
+    return missing, access, secret, endpoint
+
+
+def require_publication_credentials():
+    missing, _, _, _ = publication_settings()
+    if missing:
+        raise RuntimeError(
+            'Missing publication credentials: ' + ', '.join(missing)
+            + '. Native R2 publishing needs R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, '
+            + 'and R2_ENDPOINT or R2_ACCOUNT_ID. '
+            + 'latest-validated and website-release were not changed.'
+        )
 
 
 def child_environment(publish=False):
+    """Pass R2 credentials only to publication and selection children.
+
+    Inbound RCLONE_* and AWS_* values are always removed. The pinned selector
+    still calls rclone, so a complete R2 credential set is mapped into
+    RCLONE_CONFIG_R2_* for those children only.
+    """
     env = dict(os.environ)
     for name in list(env):
-        if name == alerts.WEBHOOK_ENV or (not publish and name.startswith(('RCLONE_', 'AWS_'))):
+        if name == alerts.WEBHOOK_ENV or name.startswith(('RCLONE_', 'AWS_')):
             del env[name]
+        elif not publish and name in PUBLICATION_NAMES:
+            del env[name]
+    if not publish:
+        return env
+    missing, access, secret, endpoint = publication_settings()
+    for name in PUBLICATION_NAMES:
+        value = os.environ.get(name, '').strip()
+        if value:
+            env[name] = value
+    if missing:
+        return env
+    env['R2_ENDPOINT'] = endpoint
+    env['RCLONE_CONFIG_R2_TYPE'] = 's3'
+    env['RCLONE_CONFIG_R2_PROVIDER'] = 'Cloudflare'
+    env['RCLONE_CONFIG_R2_ACCESS_KEY_ID'] = access
+    env['RCLONE_CONFIG_R2_SECRET_ACCESS_KEY'] = secret
+    env['RCLONE_CONFIG_R2_ENDPOINT'] = endpoint
+    env['RCLONE_CONFIG_R2_NO_CHECK_BUCKET'] = 'true'
     return env
 
 
@@ -68,6 +127,10 @@ def run(args, executor=execute):
 
     save()
     try:
+        if args.publish:
+            # Fail before capture, upload, or either pointer write.
+            stage = 'publish'
+            require_publication_credentials()
         if not args.source_snapshot:
             step('capture', [sys.executable, ROOT / 'scripts/capture_termination_sources.py', '--output', snapshot])
         step('science', [sys.executable, ROOT / 'scripts/run_termination_pipeline.py', '--as-of', args.as_of,
@@ -86,6 +149,10 @@ def run(args, executor=execute):
             alerts.send(webhook, alerts.message('warning', 'Termination release coverage warnings', {'release': release_id}, warnings))
         if args.publish:
             upload_record = work / 'upload-record.json'
+            # Flags match publish_termination_release.py at the pinned website
+            # revision: positional release directory, --record, and R2_* in the
+            # environment. Defaults keep the r2:scimap-data remote and
+            # terminations/releases prefix. The publisher does not read rclone.
             step('publish', [args.release_python, scimap / 'scripts/publish_termination_release.py', release,
                  '--record', upload_record], publish=True)
             if json.loads(upload_record.read_text()).get('status') != 'published':

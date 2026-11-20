@@ -1,5 +1,8 @@
 # Daily termination candidate operations
 
+Secrets, manual runs, staging publication, pointer rollback, failure alerts, and
+week replay are in [daily-terminations-runbook.md](daily-terminations-runbook.md).
+
 `run_daily_terminations.py` connects source capture → enforced scientific validation
 → complete release generation → optional immutable publication → latest-validated
 selection. Default execution is local only. `--publish` enables publication.
@@ -10,8 +13,9 @@ Every stage has a log and `daily-report.json`. Failure blocks downstream stages.
 With `--notify`, the orchestrator posts actionable failures, scientific warnings
 and release-geometry warnings plus completion summaries to the existing #scimap-alerts webhook. It includes
 stage/run/report context and the end of the failing log, including institution
-names. It strips R2/AWS credentials from capture/science/build child environments;
-only publication/selection children inherit them. Webhook values are never printed
+names. It strips R2 credentials, derived rclone settings, and AWS credentials
+from capture/science/build child environments; only publication/selection children
+inherit them. Webhook values are never printed
 or passed to children. SIGTERM becomes an interruption and retains a failed report.
 A hard kill cannot guarantee a Slack notification; check Actions run failure alerts
 as the operational backstop. Stage logs are internal artifacts, not public uploads.
@@ -46,17 +50,23 @@ The workflow is committed for review. Scheduled execution remains off until
 
 Use a dedicated trusted self-hosted Linux x64 runner labeled `scimap`, isolated
 from untrusted PR jobs, with R exactly matching `r-version.txt`, every package in
-`r-packages.lock.csv`, Python 3.12, pandas 2.2.3, geopandas 1.1.0, Tippecanoe and
-rclone. Provision the two approved commuter inputs under `SCIMAP_INPUT_ROOT`.
-The scientific runner checks their approved checksums. This avoids uploading the
-private county reference to a public release or pretending the unit-test runner
-contains the full scientific environment. Runner provisioning is not completed by
-committing a workflow. The workflow requires Tippecanoe 2.79.0 and rclone 1.75.1, matching the local
-proven tools; pin those in the accepted runner image before enablement.
+`r-packages.lock.csv`, Python 3.12, pandas 2.2.3, geopandas 1.1.0, Tippecanoe,
+AWS CLI v2, and rclone. Provision the two approved commuter inputs under
+`SCIMAP_INPUT_ROOT`. The scientific runner checks their approved checksums. This
+avoids uploading the private county reference to a public release or pretending
+the unit-test runner contains the full scientific environment. Runner provisioning
+is not completed by committing a workflow. The workflow requires Tippecanoe
+2.79.0, AWS CLI v2 with `s3api put-object --if-none-match` and
+`s3api list-objects-v2 --no-paginate`, and rclone 1.75.1. The publisher uploads
+with the AWS CLI. Pointer selection at the pinned website revision still calls
+rclone; the orchestrator derives that remote from `R2_*` and does not read
+`RCLONE_CONFIG_R2_*` from the workflow.
 
 Configure the `scimap-candidates` GitHub environment with the existing R2 access
 and Slack webhook secrets: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
-`SCIMAP_ALERT_WEBHOOK_URL`. Configure suitable environment reviewers before enabling
+`SCIMAP_ALERT_WEBHOOK_URL`. The workflow passes those R2 secrets through as
+`R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`, and sets `R2_ENDPOINT` in the
+workflow file. Configure suitable environment reviewers before enabling
 publication. No secret or repository access policy is changed by this PR.
 The workflow records the analysis revision through checkout and pins the website
 revision explicitly. Update that pin through review when website tooling changes.
