@@ -24,7 +24,7 @@ def check(condition, detail):
     return {'status': 'passed' if condition else 'failed', 'detail': detail}
 
 
-def workflow_checks(text):
+def workflow_checks(text, fetch_text):
     publish_default = "publish:\n        description: 'Publish candidate and advance latest-validated (never website selection)'\n        type: boolean\n        default: false"
     return {
         'website_pin': check(f'ref: {WEBSITE_PIN}' in text and 'dd191eb' not in text, WEBSITE_PIN),
@@ -36,7 +36,26 @@ def workflow_checks(text):
             'workflow passes R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_ENDPOINT',
         ),
         'schedule_gate': check("vars.SCIMAP_DAILY_ENABLED == 'true'" in text, 'schedule stays behind SCIMAP_DAILY_ENABLED'),
-        'runtime_gate': check('vars.SCIMAP_RUNTIME_READY' in text and 'SCIMAP_INPUT_ROOT' in text, 'manual runs stay behind the runtime flags'),
+        'runtime_gate': check(
+            'vars.SCIMAP_RUNTIME_READY' in text and 'SCIMAP_INPUT_ROOT' not in text,
+            'manual runs stay behind SCIMAP_RUNTIME_READY and do not read SCIMAP_INPUT_ROOT',
+        ),
+        'hosted_runner': check(
+            text.count('runs-on: ubuntu-latest') == 2
+            and 'self-hosted' not in text
+            and 'timeout-minutes: 180' in text
+            and 'actions: write' in text,
+            'preflight and candidate use ubuntu-latest; candidate keeps the 180 minute timeout and cache permission',
+        ),
+        'private_inputs': check(
+            'scimap-private-inputs' in text
+            and 'inputs/county_commute_NIH.csv' in text
+            and 'fetch_daily_inputs.py' in text
+            and 'scimap-data' not in text
+            and "PUBLIC_BUCKET = 'scimap-data'" in fetch_text
+            and 'https://osf.io/m5kb6/download' in fetch_text,
+            'district file comes from OSF; county file comes from scimap-private-inputs and the workflow never names scimap-data',
+        ),
         'publish_default_off': check(publish_default in text, 'manual publish defaults to false'),
         'aws_cli_check': check(
             'aws --version' in text and '--if-none-match' in text and '--no-paginate' in text,
@@ -64,7 +83,10 @@ def tool_check():
 
 
 def safety_tests():
-    suite = unittest.defaultTestLoader.loadTestsFromName('test_run_daily_terminations')
+    loader = unittest.defaultTestLoader
+    suite = unittest.TestSuite()
+    for name in ('test_run_daily_terminations', 'test_fetch_daily_inputs'):
+        suite.addTests(loader.loadTestsFromName(name))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     names = []
     for test, trace in list(result.failures) + list(result.errors):
@@ -89,12 +111,15 @@ def main(argv=None):
     os.chdir(ROOT)
     sys.path.insert(0, str(ROOT / 'scripts'))
     text = WORKFLOW.read_text()
+    fetch_text = (ROOT / 'scripts' / 'fetch_daily_inputs.py').read_text()
     report = {
         'website_pin': WEBSITE_PIN,
-        'workflow': workflow_checks(text),
+        'workflow': workflow_checks(text, fetch_text),
         'tools': tool_check(),
         'tests': safety_tests(),
         'live_steps_not_run': [
+            'hosted runner memory and time measurement',
+            'private bucket creation and county upload',
             'manual staging publish with historical=true',
             'A-B-A latest-validated rollback',
             'forced source_schema failure on a real snapshot',

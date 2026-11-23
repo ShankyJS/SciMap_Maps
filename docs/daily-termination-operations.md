@@ -44,23 +44,28 @@ agreement; no invented expiry or automatic retirement is enabled.
 
 ## Workflow setup and enablement
 
-The workflow is committed for review. Scheduled execution remains off until
-`SCIMAP_DAILY_ENABLED=true`; a manual run first requires
-`SCIMAP_RUNTIME_READY=true` and `SCIMAP_INPUT_ROOT`.
+The workflow is committed for review. It runs on GitHub-hosted `ubuntu-latest`.
+This change does not register a runner. Scheduled execution remains off until
+`SCIMAP_DAILY_ENABLED=true`. A manual run first requires
+`SCIMAP_RUNTIME_READY=true`, which means the team accepts GitHub-hosted runs.
 
-Use a dedicated trusted self-hosted Linux x64 runner labeled `scimap`, isolated
-from untrusted PR jobs, with R exactly matching `r-version.txt`, every package in
-`r-packages.lock.csv`, Python 3.12, pandas 2.2.3, geopandas 1.1.0, Tippecanoe,
-AWS CLI v2, and rclone. Provision the two approved commuter inputs under
-`SCIMAP_INPUT_ROOT`. The scientific runner checks their approved checksums. This
-avoids uploading the private county reference to a public release or pretending
-the unit-test runner contains the full scientific environment. Runner provisioning
-is not completed by committing a workflow. The workflow requires Tippecanoe
-2.79.0, AWS CLI v2 with `s3api put-object --if-none-match` and
-`s3api list-objects-v2 --no-paginate`, and rclone 1.75.1. The publisher uploads
-with the AWS CLI. Pointer selection at the pinned website revision still calls
-rclone; the orchestrator derives that remote from `R2_*` and does not read
-`RCLONE_CONFIG_R2_*` from the workflow.
+The workflow installs and caches R matching `r-version.txt`, every package in
+`r-packages.lock.csv`, Python 3.12, pandas 2.2.3, geopandas 1.1.0, Tippecanoe
+2.79.0, AWS CLI v2, and rclone 1.75.1. It fetches `home_119_workTR.csv` from
+public OSF and `county_commute_NIH.csv` from private R2 bucket
+`scimap-private-inputs` at key `inputs/county_commute_NIH.csv`. The county file
+must not be stored in the public `scimap-data` bucket. The private bucket is
+not created by this repository change. An admin creates it with no public
+access and no custom domain, then uploads the approved file. The fetch step
+checks the locked SHA-256 values. The runbook lists the exact secrets,
+variables, bucket, and the first manual run. That run is the memory and time
+check. Hosted-runner memory and time were not measured here.
+
+The workflow requires Tippecanoe 2.79.0, AWS CLI v2 with `s3api put-object
+--if-none-match` and `s3api list-objects-v2 --no-paginate`, and rclone 1.75.1.
+The publisher uploads with the AWS CLI. Pointer selection at the pinned website
+revision still calls rclone; the orchestrator derives that remote from `R2_*`
+and does not read `RCLONE_CONFIG_R2_*` from the workflow.
 
 Configure the `scimap-candidates` GitHub environment with the existing R2 access
 and Slack webhook secrets: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
@@ -78,7 +83,7 @@ Before setting either readiness/enablement flag:
 
 1. Assign a primary operations owner and backup, confirm source freshness,
    unmatched-location and retention rules, and agree the proposed schedule.
-2. Run local-only on the configured runner. Review scientific and geometry warnings.
+2. Run the first manual hosted workflow with `publish` false. Review scientific and geometry warnings, and confirm memory and time fit.
 3. Demonstrate a builder failure, stage-specific alert and corrected rerun.
 4. Publish a staging candidate and verify its upload/selection records. Latest
    selection is separate from website approval. Historical replay must skip latest.

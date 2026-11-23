@@ -182,6 +182,17 @@ class DailyTests(unittest.TestCase):
         self.assertIn('aws --version', text)
         self.assertIn('default: false', text)
         self.assertIn('Historical replay: never advance latest-validated', text)
+        self.assertEqual(text.count('runs-on: ubuntu-latest'), 2)
+        self.assertNotIn('self-hosted', text)
+        self.assertNotIn('SCIMAP_INPUT_ROOT', text)
+        self.assertNotIn('scimap-data', text)
+        self.assertIn('timeout-minutes: 180', text)
+        self.assertIn('actions: write', text)
+        self.assertIn('scimap-private-inputs', text)
+        self.assertIn('inputs/county_commute_NIH.csv', text)
+        self.assertIn('fetch_daily_inputs.py', text)
+        self.assertIn('install_daily_toolchain.sh', text)
+        self.assertIn('install_locked_r_packages.R', text)
 
     def test_failed_validation_does_not_publish_or_move_pointers(self):
         calls = []

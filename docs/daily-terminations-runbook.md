@@ -1,11 +1,21 @@
 # Daily termination runbook
 
-The workflow is `.github/workflows/daily-terminations.yml`. It is safe to merge
-before secrets or a runner exist. The schedule stays off until
-`SCIMAP_DAILY_ENABLED=true`. A manual run stays off until
-`SCIMAP_RUNTIME_READY=true` and `SCIMAP_INPUT_ROOT` are set. Publication stays
-off unless the run is scheduled or the manual `publish` input is true. This
-document does not enable either flag.
+The workflow is `.github/workflows/daily-terminations.yml`. It runs on a
+GitHub-hosted `ubuntu-latest` runner. No self-hosted runner is registered or
+required. It is safe to merge before secrets exist. The schedule stays off
+until `SCIMAP_DAILY_ENABLED=true`. A manual run stays off until
+`SCIMAP_RUNTIME_READY=true`. Publication stays off unless the run is scheduled
+or the manual `publish` input is true. This document does not enable either
+flag and does not create GitHub secrets or variables.
+
+The workflow installs the pinned toolchain on the runner and caches it: R
+4.6.1 from `r-version.txt`, every package in `r-packages.lock.csv`, Python
+3.12, pandas 2.2.3, geopandas 1.1.0, Tippecanoe 2.79.0, AWS CLI 2.40.0, and
+rclone 1.75.1. The runtime check still requires AWS CLI v2 with
+`put-object --if-none-match` and `list-objects-v2 --no-paginate`, and rclone
+1.75.1, because pointer selection at the pinned website revision still calls
+rclone. Memory and time for a full scientific run on the hosted runner were
+not measured. The first manual run below is how the team confirms they fit.
 
 Website tooling is pinned to `ca167515757a295df811d8a9df7a40b80a3c1f37` on
 https://github.com/clvcooke/scimap/pull/49. That is the newest commit on that
@@ -26,31 +36,65 @@ workflow.
 ## Who sets the GitHub configuration
 
 A repository admin sets these on the `scimap-candidates` environment of
-`scienceimpacts/SciMap_Maps`. Do not put the values in the repository.
+`scienceimpacts/SciMap_Maps`, except the two repository variables. Do not put
+the values in the repository. This change does not set them.
 
 | Name | Kind | Who sets it | Purpose |
 | --- | --- | --- | --- |
-| `R2_ACCESS_KEY_ID` | Environment secret | Repository admin | R2 access key. The workflow passes it as `R2_ACCESS_KEY_ID`. |
-| `R2_SECRET_ACCESS_KEY` | Environment secret | Repository admin | R2 secret key. The workflow passes it as `R2_SECRET_ACCESS_KEY`. |
-| `SCIMAP_ALERT_WEBHOOK_URL` | Environment secret | Repository admin | Slack incoming webhook for `#scimap-alerts`. Required when the orchestrator notifies. |
+| `R2_ACCESS_KEY_ID` | Environment secret | Repository admin | R2 access key. The fetch step uses it to download the private county file. Publication uses the same name. |
+| `R2_SECRET_ACCESS_KEY` | Environment secret | Repository admin | R2 secret key. |
+| `SCIMAP_ALERT_WEBHOOK_URL` | Environment secret | Repository admin | Slack incoming webhook for `#scimap-alerts`. Required for failure alerts. |
 | `R2_ENDPOINT` | Workflow env, not a secret | Already pinned in the workflow | `https://17067e7373bbfee2043fe5186d66aeb9.r2.cloudflarestorage.com` |
-| `SCIMAP_RUNTIME_READY` | Repository variable | Operations owner, after the runner is accepted | Must be `true` or every run fails preflight. |
-| `SCIMAP_INPUT_ROOT` | Repository variable | Operations owner | Absolute runner path containing `county_commute_NIH.csv` and `home_119_workTR.csv`. |
+| `SCIMAP_RUNTIME_READY` | Repository variable | Operations owner, after the team accepts GitHub-hosted runs | Must be `true` or every run fails preflight. |
 | `SCIMAP_DAILY_ENABLED` | Repository variable | Operations owner, after this acceptance and team sign-off | Must be `true` before the 13:15 UTC schedule can start. Leave unset until then. |
 
-The self-hosted runner (`self-hosted`, `linux`, `x64`, `scimap`) is registered
-by the operations owner. This change does not register it. The runtime check
-requires Python 3.12, pandas 2.2.3, geopandas 1.1.0, Tippecanoe 2.79.0, AWS CLI
-v2 with `put-object --if-none-match` and `list-objects-v2 --no-paginate`, and
-rclone 1.75.1.
+There is no runner registration step. Preflight and the candidate job both use
+`ubuntu-latest`. The candidate timeout stays 180 minutes. Workflow permissions
+stay `contents: read` and add `actions: write` so the toolchain caches can be
+saved. The runtime check requires Python 3.12, pandas 2.2.3, geopandas 1.1.0,
+Tippecanoe 2.79.0, AWS CLI v2 with `put-object --if-none-match` and
+`list-objects-v2 --no-paginate`, and rclone 1.75.1.
+
+## Private county input
+
+`home_119_workTR.csv` is fetched at run time from public OSF
+`https://osf.io/m5kb6/download`. It must match the lock: SHA-256
+`98299795a87f84df5c8d0b2a6adc782527eb211582c7ea8bfbbb669a2c8e839a`, 50,598,712
+bytes.
+
+`county_commute_NIH.csv` stays private. The workflow downloads it from R2
+bucket `scimap-private-inputs`, object key `inputs/county_commute_NIH.csv`. It
+must match SHA-256
+`a94bf35dee0c3086cdfcf458ef5775a133d4925826d9e05868d1a41c98386ac5`, 503,609,766
+bytes. That bucket must have no public access and no custom domain. It must
+not be `scimap-data`. `scimap-data` is served at `https://data.scienceimpacts.org`,
+and the county file must not be stored there under any prefix.
+
+The admin who can create R2 buckets creates `scimap-private-inputs` and uploads
+the approved file once. The GitHub `R2_ACCESS_KEY_ID` secret must be able to
+`GetObject` that key. A missing secret, a missing object, or a checksum
+mismatch fails the fetch step before the orchestrator starts. When the Slack
+webhook is set, the alert is `Daily input fetch failed — nothing was published`.
+`latest-validated` and `website-release` are not changed.
+
+This repository change does not create the bucket and does not upload the file.
+During preparation, the workspace R2 S3 credential could `HeadBucket`
+`scimap-data`, while `CreateBucket` and `ListBuckets` returned AccessDenied.
+The Cloudflare API token verified and listed zero accounts, so it cannot manage
+R2. A credential that can create a private R2 bucket with no public access and
+no custom domain is still missing.
+
+`SCIMAP_INPUT_ROOT` is not a workflow input. The fetch step writes the two
+verified files under the runner temp directory, and the orchestrator reads
+those paths.
 
 ## Manual run
 
-1. Confirm `SCIMAP_RUNTIME_READY=true` and `SCIMAP_INPUT_ROOT` point at the approved runner files. Leave `SCIMAP_DAILY_ENABLED` unset.
+1. Confirm the private bucket and object exist, the environment secrets above are set, and `SCIMAP_RUNTIME_READY=true`. Leave `SCIMAP_DAILY_ENABLED` unset.
 2. Actions → **Daily termination candidate** → **Run workflow** on the reviewed branch.
 3. `as_of` blank uses the current UTC date. Set `YYYY-MM-DD` to replay a cutoff.
-4. Leave `publish` false for a runner build that does not upload and does not read R2.
-5. Set `publish` true only when an immutable upload is intended. A missing or blank R2 secret then fails before capture. The Slack alert names stage `publish`, the report records `failed_stage: publish`, and neither pointer is written.
+4. Leave `publish` false for the first hosted run. That run still downloads the private county file, so it reads R2. It does not upload a release or move a pointer. Use it to confirm the toolchain, the scientific job, and the 180-minute hosted-runner memory and disk limit. That fit was not measured in this change.
+5. Set `publish` true only when an immutable upload is intended. A missing or blank R2 secret fails at the fetch step before capture. The Slack alert names `Daily input fetch`, and neither pointer is written. If fetch succeeded, the same credentials are present for publication.
 6. Set `historical` true to keep `latest-validated` where it is. `publish` must also be true if the immutable objects should be stored. Historical never selects a pointer.
 
 The concurrency group `termination-release-publication` does not cancel an active upload.
@@ -111,7 +155,7 @@ A missing secret or a failed stage looks like this:
 
 A scientific schema failure uses the same shape with stage `science` and the text `Scientific run did not pass enforced validation`. The stage log and `analysis/run-report.json` name the check, such as `source_schema:nih_v3_terminations.csv`. No `upload-record.json` or `selection-record.json` is written. Both pointers stay as they were.
 
-A runtime failure before the orchestrator starts posts `:rotating_light: *Daily runtime setup failed — nothing was published*`.
+A runtime failure before the orchestrator starts posts `:rotating_light: *Daily runtime setup failed — nothing was published*`. An input fetch failure posts `:rotating_light: *Daily input fetch failed — nothing was published*` and includes the fetch error. Neither message means a pointer moved.
 
 The run is red. The artifact `termination-<run-id>-<attempt>` contains `daily-report.json` and the stage logs when the orchestrator created them. `"website_selection_changed": false` is the local report flag. Confirm the live pointers by reading them, not by assuming the flag.
 
@@ -127,8 +171,8 @@ python scripts/run_daily_terminations.py \
   --source-snapshot /approved/snapshot \
   --scimap /path/to/scimap-at-ca167515 \
   --source-baseline data --reference-output output \
-  --county-commute "$SCIMAP_INPUT_ROOT/county_commute_NIH.csv" \
-  --district-commute "$SCIMAP_INPUT_ROOT/home_119_workTR.csv" \
+  --county-commute /approved/county_commute_NIH.csv \
+  --district-commute /approved/home_119_workTR.csv \
   --output /new/replay-directory
 ```
 
@@ -136,7 +180,7 @@ Add `--publish` only when R2 credentials are intentionally present and a new rel
 
 ## Acceptance checklist
 
-Do not run the live steps until a repository admin has entered the secrets, the runner is accepted, and the team has agreed to a staging window. Nothing below has been run against live R2.
+Do not run the live steps until a repository admin has created `scimap-private-inputs` with no public access and no custom domain, uploaded the approved county file, entered the secrets, set `SCIMAP_RUNTIME_READY=true`, and the team has agreed to a staging window. Nothing below has been run against live R2. The hosted-runner memory and time fit has not been measured.
 
 Dry-run now, from this repository:
 
@@ -148,7 +192,7 @@ That command does not contact R2. It checks the workflow pin and gates, runs the
 
 Live steps, in order, when the window is open:
 
-1. Manual run with `publish=false`. Confirm the scientific report passed and no upload or selection record exists.
+1. Manual run with `publish=false` and the secrets present. This is the memory and time check. Confirm the scientific report passed, no upload or selection record exists, and the job finishes inside 180 minutes without running out of disk or memory.
 2. Manual run with `publish=true`, `historical=true`, and a fresh cutoff. This is the staging release. Confirm `upload-record.json` is `published` with `transport` `aws-cli`, `selection-record.json` is absent, and both public pointers are unchanged.
 3. Forced schema failure: copy an approved snapshot, delete the `spent_at_disruption` column from `nih_v3_terminations.csv`, and run with `--source-snapshot` pointing at that copy, `--publish`, and `--notify`. The run must fail at `science`, alert as above, and leave both pointers unchanged. Do not repair the snapshot in place. Use a new output directory for the corrected rerun.
 4. A-B-A on `latest-validated` only, using the selector commands above. Save A, apply B, read it back, apply A, read it back. `website-release.json` stays on its previous release for the whole demonstration.

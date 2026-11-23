@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: termination-release-publication
@@ -30,18 +31,18 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || vars.SCIMAP_DAILY_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Require configured runtime before queueing the private-input runner
+      - name: Require operations acceptance before a hosted run
         env:
           READY: ${{ vars.SCIMAP_RUNTIME_READY }}
-          INPUT_ROOT: ${{ vars.SCIMAP_INPUT_ROOT }}
         run: |
-          test "$READY" = true || { echo 'Configure and verify the pinned runtime and operations ownership before enabling this workflow.'; exit 1; }
-          test -n "$INPUT_ROOT" || { echo 'SCIMAP_INPUT_ROOT must point to the approved runner references.'; exit 1; }
+          test "$READY" = true || { echo 'Set SCIMAP_RUNTIME_READY=true after the team accepts GitHub-hosted daily runs.'; exit 1; }
   candidate:
     needs: preflight
-    runs-on: [self-hosted, linux, x64, scimap]
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     environment: scimap-candidates
+    env:
+      R_LIBS_USER: ${{ github.workspace }}/analysis/R-library
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,6 +56,32 @@ jobs:
           ref: ca167515757a295df811d8a9df7a40b80a3c1f37
           path: website
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: analysis/requirements-daily.txt
+      - name: Install pinned Python packages
+        run: python -m pip install -r analysis/requirements-daily.txt
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.6.1'
+          use-public-rspm: true
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/analysis/R-library
+          key: r-libs-4.6.1-${{ hashFiles('analysis/r-version.txt', 'analysis/r-packages.lock.csv') }}
+      - name: Install locked R packages
+        working-directory: analysis
+        run: Rscript scripts/install_locked_r_packages.R r-packages.lock.csv
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.daily-tools
+          key: daily-tools-tippecanoe-2.79.0-rclone-1.75.1-aws-2.40.0
+      - name: Install pinned Tippecanoe, AWS CLI, and rclone
+        run: bash analysis/scripts/install_daily_toolchain.sh "${{ github.workspace }}/.daily-tools"
+      - name: Put pinned tools on PATH
+        run: echo "${{ github.workspace }}/.daily-tools/bin" >> "$GITHUB_PATH"
       - name: Check pinned runtime
         working-directory: analysis
         env:
@@ -71,11 +98,25 @@ jobs:
           # select_termination_release.py at this pin still calls rclone for pointer reads and writes.
           rclone version | head -n 1 | grep -Fx 'rclone v1.75.1'
           python3 -c 'import sys, pandas, geopandas; assert sys.version_info[:2] == (3, 12); assert pandas.__version__ == "2.2.3"; assert geopandas.__version__ == "1.1.0"'
+      - name: Fetch approved commuter inputs
+        id: inputs
+        working-directory: analysis
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: https://17067e7373bbfee2043fe5186d66aeb9.r2.cloudflarestorage.com
+          SCIMAP_PRIVATE_BUCKET: scimap-private-inputs
+          SCIMAP_PRIVATE_KEY: inputs/county_commute_NIH.csv
+          INPUT_DIR: ${{ runner.temp }}/daily-inputs
+          INPUT_ERROR: ${{ runner.temp }}/input-fetch-error.txt
+        run: |
+          set -euo pipefail
+          python3 scripts/fetch_daily_inputs.py --output "$INPUT_DIR" --error-log "$INPUT_ERROR"
       - name: Run daily candidate pipeline
         id: daily
         working-directory: analysis
         env:
-          INPUT_ROOT: ${{ vars.SCIMAP_INPUT_ROOT }}
+          INPUT_DIR: ${{ runner.temp }}/daily-inputs
           AS_OF: ${{ inputs.as_of }}
           PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
           HISTORICAL: ${{ inputs.historical }}
@@ -92,22 +133,31 @@ jobs:
           if [ "$HISTORICAL" = true ]; then flags+=(--historical); fi
           python3 scripts/run_daily_terminations.py \
             --scimap ../website --as-of "$cutoff" \
-            --county-commute "$INPUT_ROOT/county_commute_NIH.csv" \
-            --district-commute "$INPUT_ROOT/home_119_workTR.csv" \
+            --county-commute "$INPUT_DIR/county_commute_NIH.csv" \
+            --district-commute "$INPUT_DIR/home_119_workTR.csv" \
             --source-baseline data --reference-output output \
             --output "$RUNNER_TEMP/termination-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             --notify "${flags[@]}"
-      - name: Alert for runtime/setup failures before the orchestrator starts
+      - name: Alert for setup or input failures before the orchestrator starts
         if: failure() && steps.daily.outcome != 'failure'
         working-directory: analysis
         env:
           SCIMAP_ALERT_WEBHOOK_URL: ${{ secrets.SCIMAP_ALERT_WEBHOOK_URL }}
+          INPUT_ERROR: ${{ runner.temp }}/input-fetch-error.txt
         run: |
           python3 - <<'PY'
+          import os
+          from pathlib import Path
           import sys
           sys.path.insert(0, 'scripts')
           import alerts
-          alerts.send(alerts.webhook_from_env(), alerts.run_failed('Daily runtime setup', RuntimeError('See the failed setup step'), {}))
+          detail = 'See the failed setup step'
+          title = 'Daily runtime setup'
+          error_path = Path(os.environ.get('INPUT_ERROR', ''))
+          if error_path.is_file():
+              detail = error_path.read_text()[:1500]
+              title = 'Daily input fetch'
+          alerts.send(alerts.webhook_from_env(), alerts.run_failed(title, RuntimeError(detail), {}))
           PY
       - name: Retain logs, manifests, upload/selection evidence and validation reports
         if: always()
