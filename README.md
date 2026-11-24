@@ -12,6 +12,43 @@ In addition, the IDC\_map script calculates the loss projected from the proposed
 
 All output files are stored in the output folder.
 
+## Reproducing termination outputs offline
+
+The termination notebooks read saved inputs only; source retrieval is separate from scientific execution. Capture a new immutable Grant Witness snapshot with:
+
+```bash
+python3 scripts/capture_termination_sources.py \
+  --output /path/to/snapshots/<snapshot-id>
+```
+
+The capture command validates required columns and records retrieval time, row counts and checksums. Copy or link its two CSVs into a versioned input tree only after review. `scripts/run_termination_pipeline.py` then runs NIH, NSF and Combined in fresh R processes, records all input hashes, and reconciles every scientific output against an approved reference directory.
+
+The repository supplies the versioned Grant Witness snapshots and maintained references. Two large inputs stay outside Git: the approved `county_commute_NIH.csv` and a saved copy of OSF `home_119_workTR.csv`. Do not substitute the older Drive `states.csv` or `tract_dictionary.csv` for the repository versions.
+
+```bash
+R_LIBS_USER=/path/to/pinned-r-library \
+python3 scripts/run_termination_pipeline.py \
+  --as-of 2026-09-25 \
+  --county-commute /path/to/county_commute_NIH.csv \
+  --district-commute /path/to/home_119_workTR.csv \
+  --reference-output output \
+  --output /tmp/termination-replay
+```
+
+The command refuses to overwrite its output. A successful run writes the generated CSVs and `run-report.json`; no notebook downloads or publishing occur. `external-inputs.lock.csv` rejects unapproved large inputs, while `r-version.txt` and `r-packages.lock.csv` validate the R environment.
+
+For a new-data candidate, pass the immutable directory created by the capture command with `--source-snapshot`, and add `--comparison-mode report`. Report mode still enforces schemas, finite values, unique generated keys, input integrity and package locks, but records expected scientific changes from the prior approved output instead of requiring identical values.
+
+Every run then applies `scripts/validate_termination_outputs.py` and stores the result under `validation` in `run-report.json`. Errors fail the run and block publication: source schema, grants duplicated by dictionary joins, a common reporting week, complete non-negative weekly series where overall loss never falls, state/county/district/city reconciliation, dollar conservation through commuter allocation, unique institution identities, and Combined = NIH + NSF. Warnings record unmatched locations (an error above a provisional 1% of dollars), institution/tract state conflicts, duplicate dictionary keys and drift of nationwide totals from the approved output above 0.1% (flagged for review); freshness reports NIH and NSF separately, including whether the required data actually changed. Use `--validation report` only for regression replays of a fixture with known, accepted errors. The validator also runs on an existing run directory:
+
+Add `--notify` to the capture and pipeline commands in scheduled runs to post to Slack through the incoming webhook in `SCIMAP_ALERT_WEBHOOK_URL`: a download, schema or execution failure, a run blocked by validation errors, or a run that passed with warnings (for example unmatched locations). A clean run posts nothing, and local runs post only when `--notify` is given. Pass the last approved raw snapshot as `--source-baseline` so Grant Witness column changes are compared with Grant Witness itself, not with the R-written copies under `data/`. Warnings are kept to items someone must decide or correct; unused duplicate dictionary names, and multiplier differences already explained by a state conflict, are recorded as information only. `--notify` without a Slack webhook URL fails before any work starts.
+
+```bash
+python3 scripts/validate_termination_outputs.py /tmp/termination-run \
+  --as-of 2026-10-19 --source-dir /path/to/snapshots/<snapshot-id> \
+  --reference-output output --report /tmp/validation.json
+```
+
 ## Project Structure
 ```
 ├── data/                               # Raw data
@@ -105,3 +142,13 @@ The following two files are too large to post to Github and are therefore stored
 home\_119\_workTR: commuter flows with Congressional District Cong\_ORIGIN and census tract Cong\_DESTINATION
 
 NIH\_raw: large file of active NIH grants for fiscal year 2024 downloaded from RePORTER
+
+## Scientific tooling CI
+
+`termination-validation.yml` runs the standard-library regression suite on pull requests to main, pushes to main and manual dispatch with Python 3.12 and 3.13, retaining the verbose test log as a workflow artifact. It requires no credentials and sends no live Slack messages. Run locally with:
+
+```bash
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
+```
+
+This checks ingestion, comparisons, validation and alerts using fixtures and mocked network calls. It does not run the full R model or approve a dataset; the separate pinned-R offline run and `run-report.json` provide that evidence.

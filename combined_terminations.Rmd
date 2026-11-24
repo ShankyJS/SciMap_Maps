@@ -1,27 +1,76 @@
 ---
 title: "combined_terminations"
 output: html_document
+params:
+  output_dir: "output"
+  as_of: null
 ---
 
 ```{r}
 library(tidyverse)
+
+if (is.null(params$output_dir) || is.null(params$as_of)) stop("output_dir and as_of are required")
+as_of <- as_date(params$as_of)
+if (is.na(as_of)) stop("as_of must be an ISO date")
+start_date <- as_date("2025-02-28")
+reporting_week <- floor_date(as_of, unit = "week", week_start = if_else(wday(start_date) == 1, 7, wday(start_date) - 1))
+output_path <- function(...) file.path(params$output_dir, ...)
+join_keys <- c("org_name", "org_city", "org_state", "week")
+metric_names <- c(
+  "current_loss", "current_grant_loss", "current_econ_loss", "current_job_loss",
+  "overall_loss", "overall_grant_loss", "overall_econ_loss", "overall_job_loss"
+)
+
+assert_unique <- function(data, label) {
+  duplicates <- data %>%
+    count(across(all_of(join_keys)), name = "rows") %>%
+    filter(rows > 1)
+  if (nrow(duplicates) > 0) {
+    stop(label, " contains duplicate institution/week identities: ",
+         paste(head(duplicates$org_name, 5), collapse = ", "))
+  }
+}
 ```
 
 ```{r}
-terminations_org_nsf <- read.csv("output/terminations_org_nsf.csv") %>%
-  mutate(lat = round(lat, 5),
-         lon = round(lon, 5)) %>%
-  rename_with(~ paste0(.x, ".nsf", recycle0 = TRUE), c(ends_with("loss")))
-
-terminations_org_nih <- read.csv("output/terminations_org.csv") %>%
-  mutate(lat = round(lat, 5),
-         lon = round(lon, 5)) %>%
-  rename_with(~ paste0(.x, ".nih", recycle0 = TRUE), c(ends_with("loss")))
-
-terminations_org_combined <- full_join(terminations_org_nih, terminations_org_nsf) %>%
+terminations_org_nsf <- read.csv(output_path("terminations_org_nsf.csv")) %>%
   mutate(week = as_date(week),
-         across(current_loss.nih:overall_job_loss.nsf, ~ if_else(is.na(.x), 0, .x))) %>%
-  rowwise() %>%
+         lat = round(lat, 5),
+         lon = round(lon, 5)) %>%
+  filter(week <= reporting_week) %>%
+  rename_with(~ paste0(.x, ".nsf"), all_of(metric_names))
+
+terminations_org_nih <- read.csv(output_path("terminations_org.csv")) %>%
+  mutate(week = as_date(week),
+         lat = round(lat, 5),
+         lon = round(lon, 5)) %>%
+  filter(week <= reporting_week) %>%
+  rename_with(~ paste0(.x, ".nih"), all_of(metric_names))
+
+assert_unique(terminations_org_nih, "NIH organization output")
+assert_unique(terminations_org_nsf, "NSF organization output")
+
+terminations_org_combined <- full_join(
+  terminations_org_nih,
+  terminations_org_nsf,
+  by = join_keys,
+  suffix = c(".nih_location", ".nsf_location")
+)
+
+coordinate_conflicts <- terminations_org_combined %>%
+  filter(!is.na(lat.nih_location), !is.na(lat.nsf_location),
+         lat.nih_location != lat.nsf_location | lon.nih_location != lon.nsf_location)
+if (nrow(coordinate_conflicts) > 0) {
+  stop("NIH/NSF coordinate conflicts remain for: ",
+       paste(unique(head(coordinate_conflicts$org_name, 5)), collapse = ", "))
+}
+
+agency_metrics <- c(paste0(metric_names, ".nih"), paste0(metric_names, ".nsf"))
+terminations_org_combined <- terminations_org_combined %>%
+  mutate(lat = coalesce(lat.nih_location, lat.nsf_location),
+         lon = coalesce(lon.nih_location, lon.nsf_location),
+         across(all_of(agency_metrics), ~ replace_na(.x, 0))) %>%
+  select(-ends_with(".nih_location"), -ends_with(".nsf_location")) %>%
   mutate(current_loss.combined = current_loss.nih + current_loss.nsf,
          current_grant_loss.combined = current_grant_loss.nih + current_grant_loss.nsf,
          current_econ_loss.combined = current_econ_loss.nih + current_econ_loss.nsf,
@@ -30,25 +79,19 @@ terminations_org_combined <- full_join(terminations_org_nih, terminations_org_ns
          overall_grant_loss.combined = overall_grant_loss.nih + overall_grant_loss.nsf,
          overall_econ_loss.combined = overall_econ_loss.nih + overall_econ_loss.nsf,
          overall_job_loss.combined = overall_job_loss.nih + overall_job_loss.nsf) %>%
-  arrange(week)
+  select(org_name, org_city, org_state, lat, lon, week,
+         all_of(paste0(metric_names, ".nih")),
+         all_of(paste0(metric_names, ".nsf")),
+         all_of(paste0(metric_names, ".combined"))) %>%
+  arrange(week, org_name, org_city, org_state)
 
-write_csv(terminations_org_combined, "output/terminations_org_combined.csv")
-
-start_date <- as_date("2025-02-28")
-current_week <- floor_date(today(), 
-                           unit = "week", 
-                           week_start = if_else(wday(start_date) == 1, 7, wday(start_date) - 1))
-
-terminations_org_combined %>%
-  filter(week == current_week) %>%
-  ungroup() %>%
-  summarise(across(current_loss.nih:overall_job_loss.combined, ~ sum(.x)))
+assert_unique(terminations_org_combined, "Combined organization output")
+write_csv(terminations_org_combined, output_path("terminations_org_combined.csv"))
 
 terminations_org_combined %>%
-  filter(week == current_week) %>%
+  filter(week == reporting_week) %>%
   ungroup() %>%
   summarise(across(starts_with("current"), ~ sum(.x))) %>%
   select(-starts_with("current_loss")) %>%
-  write_csv("output/topline.csv")
+  write_csv(output_path("topline.csv"))
 ```
-
