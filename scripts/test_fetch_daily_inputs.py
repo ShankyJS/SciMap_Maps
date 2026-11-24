@@ -58,6 +58,11 @@ class FetchTests(unittest.TestCase):
         self.assertNotIn(self.env['R2_SECRET_ACCESS_KEY'], command)
         self.assertEqual(env['AWS_ACCESS_KEY_ID'], 'access')
         self.assertEqual(env['AWS_SECRET_ACCESS_KEY'], 'secret')
+        self.assertEqual(env['AWS_REGION'], 'auto')
+        self.assertEqual(env['AWS_CONFIG_FILE'], '/dev/null')
+        self.assertEqual(env['AWS_SHARED_CREDENTIALS_FILE'], '/dev/null')
+        self.assertNotIn('AWS_PROFILE', env)
+        self.assertNotIn('AWS_SESSION_TOKEN', env)
         Path(command[-1]).write_bytes(self.county[3])
         return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
 

@@ -88,6 +88,13 @@ def download_private(bucket, key, dest, runner):
     env['AWS_REGION'] = 'auto'
     env['AWS_EC2_METADATA_DISABLED'] = 'true'
     env['AWS_PAGER'] = ''
+    env['AWS_CLI_AUTO_PROMPT'] = 'off'
+    # A workspace AWS config/region is for real AWS and makes R2 return 400.
+    env['AWS_CONFIG_FILE'] = '/dev/null'
+    env['AWS_SHARED_CREDENTIALS_FILE'] = '/dev/null'
+    env.pop('AWS_SESSION_TOKEN', None)
+    env.pop('AWS_PROFILE', None)
+    env.pop('AWS_DEFAULT_PROFILE', None)
     # The outfile is last. Flags after it are not accepted by the AWS CLI.
     result = runner(
         ['aws', 's3api', 'get-object', '--bucket', bucket, '--key', key,

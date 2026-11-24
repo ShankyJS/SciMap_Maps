@@ -53,12 +53,11 @@ The workflow installs and caches R matching `r-version.txt`, every package in
 `r-packages.lock.csv`, Python 3.12, pandas 2.2.3, geopandas 1.1.0, Tippecanoe
 2.79.0, AWS CLI v2, and rclone 1.75.1. It fetches `home_119_workTR.csv` from
 public OSF and `county_commute_NIH.csv` from private R2 bucket
-`scimap-private-inputs` at key `inputs/county_commute_NIH.csv`. The county file
-must not be stored in the public `scimap-data` bucket. The private bucket is
-not created by this repository change. An admin creates it with no public
-access and no custom domain, then uploads the approved file. The fetch step
-checks the locked SHA-256 values. The runbook lists the exact secrets,
-variables, bucket, and the first manual run. That run is the memory and time
+`scimap-private-inputs` at key `inputs/county_commute_NIH.csv`. That bucket has
+no public access and no custom domain. The approved county object is already
+stored there and is not in the public `scimap-data` bucket. The fetch step
+checks the locked SHA-256 values. The runbook lists the GitHub secrets and
+variables the admin must set. The first manual run is the memory and time
 check. Hosted-runner memory and time were not measured here.
 
 The workflow requires Tippecanoe 2.79.0, AWS CLI v2 with `s3api put-object

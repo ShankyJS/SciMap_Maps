@@ -41,8 +41,8 @@ the values in the repository. This change does not set them.
 
 | Name | Kind | Who sets it | Purpose |
 | --- | --- | --- | --- |
-| `R2_ACCESS_KEY_ID` | Environment secret | Repository admin | R2 access key. The fetch step uses it to download the private county file. Publication uses the same name. |
-| `R2_SECRET_ACCESS_KEY` | Environment secret | Repository admin | R2 secret key. |
+| `R2_ACCESS_KEY_ID` | Environment secret | Repository admin | R2 access key with `GetObject` on `scimap-private-inputs/inputs/county_commute_NIH.csv`. Publication uses the same name. |
+| `R2_SECRET_ACCESS_KEY` | Environment secret | Repository admin | R2 secret key for that same access key. |
 | `SCIMAP_ALERT_WEBHOOK_URL` | Environment secret | Repository admin | Slack incoming webhook for `#scimap-alerts`. Required for failure alerts. |
 | `R2_ENDPOINT` | Workflow env, not a secret | Already pinned in the workflow | `https://17067e7373bbfee2043fe5186d66aeb9.r2.cloudflarestorage.com` |
 | `SCIMAP_RUNTIME_READY` | Repository variable | Operations owner, after the team accepts GitHub-hosted runs | Must be `true` or every run fails preflight. |
@@ -70,19 +70,22 @@ bytes. That bucket must have no public access and no custom domain. It must
 not be `scimap-data`. `scimap-data` is served at `https://data.scienceimpacts.org`,
 and the county file must not be stored there under any prefix.
 
-The admin who can create R2 buckets creates `scimap-private-inputs` and uploads
-the approved file once. The GitHub `R2_ACCESS_KEY_ID` secret must be able to
-`GetObject` that key. A missing secret, a missing object, or a checksum
-mismatch fails the fetch step before the orchestrator starts. When the Slack
-webhook is set, the alert is `Daily input fetch failed — nothing was published`.
-`latest-validated` and `website-release` are not changed.
+The bucket already exists, with no public access and no custom domain. The
+approved `county_commute_NIH.csv` is stored at that key. Its SHA-256 and size
+match the lock. Unauthenticated reads are rejected: the R2 endpoint returns
+HTTP 400 and no bytes, `https://scimap-private-inputs.r2.dev/inputs/county_commute_NIH.csv`
+returns HTTP 403, and `https://data.scienceimpacts.org/inputs/county_commute_NIH.csv`
+returns HTTP 403. This repository does not create buckets and does not set
+GitHub secrets.
 
-This repository change does not create the bucket and does not upload the file.
-During preparation, the workspace R2 S3 credential could `HeadBucket`
-`scimap-data`, while `CreateBucket` and `ListBuckets` returned AccessDenied.
-The Cloudflare API token verified and listed zero accounts, so it cannot manage
-R2. A credential that can create a private R2 bucket with no public access and
-no custom domain is still missing.
+The GitHub `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` secrets must be able
+to `GetObject` that key. The fetch command maps those secrets onto the AWS CLI,
+forces `AWS_REGION=auto`, and ignores `AWS_CONFIG_FILE` and
+`AWS_SHARED_CREDENTIALS_FILE`. A real-AWS region or config file makes R2 return
+HTTP 400. A missing secret, a missing object, or a checksum mismatch fails the
+fetch step before the orchestrator starts. When the Slack webhook is set, the
+alert is `Daily input fetch failed — nothing was published`.
+`latest-validated` and `website-release` are not changed.
 
 `SCIMAP_INPUT_ROOT` is not a workflow input. The fetch step writes the two
 verified files under the runner temp directory, and the orchestrator reads
@@ -180,7 +183,7 @@ Add `--publish` only when R2 credentials are intentionally present and a new rel
 
 ## Acceptance checklist
 
-Do not run the live steps until a repository admin has created `scimap-private-inputs` with no public access and no custom domain, uploaded the approved county file, entered the secrets, set `SCIMAP_RUNTIME_READY=true`, and the team has agreed to a staging window. Nothing below has been run against live R2. The hosted-runner memory and time fit has not been measured.
+The private bucket and the approved county object are already in place. Do not run the live steps until a repository admin has set the `scimap-candidates` secrets listed above, set `SCIMAP_RUNTIME_READY=true`, and the team has agreed to a staging window. No live pointer change has been run. The hosted-runner memory and time fit has not been measured.
 
 Dry-run now, from this repository:
 
