@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -139,6 +140,57 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(publishing['RCLONE_CONFIG_R2_PROVIDER'], 'Cloudflare')
         self.assertEqual(publishing['RCLONE_CONFIG_R2_ENDPOINT'], 'https://example.r2.cloudflarestorage.com')
         self.assertEqual(publishing['RCLONE_CONFIG_R2_NO_CHECK_BUCKET'], 'true')
+        self.assertTrue(publishing['PATH'].startswith(str(daily.PUBLISHER_AWS) + daily.os.pathsep))
+        self.assertFalse(plain['PATH'].startswith(str(daily.PUBLISHER_AWS) + daily.os.pathsep))
+
+    def test_publish_step_sets_a_bounded_upload_pool(self):
+        captured = {}
+
+        def fake_popen(command, stdout=None, stderr=None, env=None):
+            captured['env'] = env
+
+            class Proc:
+                def wait(self, timeout=None):
+                    return 0
+
+                def poll(self):
+                    return 0
+
+            Proc.stdout = io.BytesIO(b'')
+            return Proc()
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(daily.os.environ, {
+            'R2_ACCESS_KEY_ID': 'access',
+            'R2_SECRET_ACCESS_KEY': 'secret',
+            'R2_ENDPOINT': 'https://example.invalid',
+        }), patch.object(daily.subprocess, 'Popen', fake_popen):
+            work = Path(tmp)
+            daily.execute(['python3', 'publish_termination_release.py'], work / 'publish.log', publish=True)
+            publishing = captured['env']
+            daily.execute(['python3', 'select_termination_release.py'], work / 'latest.log', publish=True)
+            selecting = captured['env']
+        self.assertEqual(publishing['SCIMAP_PUBLISH_CONCURRENCY'], '32')
+        self.assertEqual(publishing['SCIMAP_PUBLISH_POOL_DIR'], str(work / 'publish-pool'))
+        self.assertTrue(publishing['PATH'].startswith(str(daily.PUBLISHER_AWS) + daily.os.pathsep))
+        self.assertNotIn('SCIMAP_PUBLISH_POOL_DIR', selecting)
+
+    def test_bad_concurrency_fails_before_capture(self):
+        calls = []
+
+        def executor(command, log, credentials):
+            calls.append(log.stem)
+
+        report, message = self.run_with(executor, {
+            'R2_ACCESS_KEY_ID': 'access',
+            'R2_SECRET_ACCESS_KEY': 'secret',
+            'R2_ENDPOINT': 'https://example.invalid',
+            'SCIMAP_PUBLISH_CONCURRENCY': '128',
+        })
+        self.assertEqual(calls, [])
+        self.assertEqual(report['failed_stage'], 'publish')
+        self.assertIn('SCIMAP_PUBLISH_CONCURRENCY', report['error'])
+        self.assertIn('Website selection was not changed', message)
+        self.assertFalse(report['website_selection_changed'])
 
     def test_account_id_can_supply_the_endpoint(self):
         with patch.dict(daily.os.environ, {
@@ -182,8 +234,12 @@ class DailyTests(unittest.TestCase):
         self.assertIn('aws --version', text)
         self.assertIn('default: false', text)
         self.assertIn('Historical replay: never advance latest-validated', text)
-        self.assertEqual(text.count('runs-on: ubuntu-latest'), 2)
+        self.assertEqual(text.count('runs-on: ubuntu-latest'), 3)
         self.assertNotIn('self-hosted', text)
+        self.assertIn('report-unalerted-failure:', text)
+        self.assertIn('failure() || cancelled()', text)
+        self.assertIn("needs.candidate.outputs.slack_reported != 'true'", text)
+        self.assertNotIn('website-release', text)
         self.assertNotIn('SCIMAP_INPUT_ROOT', text)
         self.assertNotIn('scimap-data', text)
         self.assertIn('timeout-minutes: 180', text)
@@ -224,6 +280,29 @@ class DailyTests(unittest.TestCase):
         self.assertIn('enforced validation', report['error'])
         self.assertIn('failed at science', message)
         self.assertIn('Website selection was not changed', message)
+
+
+    def test_execute_keeps_the_stage_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'capture.log'
+            daily.execute(['/bin/echo', 'hello-stage'], log, publish=False)
+            self.assertEqual(log.read_text().strip(), 'hello-stage')
+
+    def test_execute_failure_keeps_the_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'publish.log'
+            with self.assertRaises(RuntimeError) as caught:
+                daily.execute(['/bin/sh', '-c', 'echo boom; exit 7'], log, publish=False)
+            self.assertIn('Exit 7', str(caught.exception))
+            self.assertIn('boom', str(caught.exception))
+            self.assertIn('boom', log.read_text())
+
+    def test_slack_reported_marker_writes_the_step_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / 'output')
+            with patch.dict(daily.os.environ, {'GITHUB_OUTPUT': path}):
+                daily.mark_slack_reported()
+            self.assertEqual(Path(path).read_text(), 'slack_reported=true\n')
 
 
 if __name__ == '__main__':

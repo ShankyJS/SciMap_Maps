@@ -41,6 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     environment: scimap-candidates
+    outputs:
+      slack_reported: ${{ steps.daily.outputs.slack_reported || steps.early_alert.outputs.slack_reported }}
     env:
       R_LIBS_USER: ${{ github.workspace }}/analysis/R-library
     steps:
@@ -127,6 +129,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Stream memory and disk into the job log. A lost runner never uploads the stage files.
+          resource_pulse() {
+            while true; do
+              date -u +'resource %Y-%m-%dT%H:%M:%SZ'
+              free -m || true
+              df -h / "${RUNNER_TEMP}" || true
+              sleep 30
+            done
+          }
+          resource_pulse &
+          pulse_pid=$!
+          trap 'kill "$pulse_pid" 2>/dev/null || true' EXIT
           cutoff="${AS_OF:-$(date -u +%F)}"
           flags=()
           if [ "$PUBLISH" = true ]; then flags+=(--publish); fi
@@ -139,6 +153,7 @@ jobs:
             --output "$RUNNER_TEMP/termination-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             --notify "${flags[@]}"
       - name: Alert for setup or input failures before the orchestrator starts
+        id: early_alert
         if: failure() && steps.daily.outcome != 'failure'
         working-directory: analysis
         env:
@@ -157,7 +172,11 @@ jobs:
           if error_path.is_file():
               detail = error_path.read_text()[:1500]
               title = 'Daily input fetch'
-          alerts.send(alerts.webhook_from_env(), alerts.run_failed(title, RuntimeError(detail), {}))
+          if alerts.send(alerts.webhook_from_env(), alerts.run_failed(title, RuntimeError(detail), {})):
+              output = os.environ.get('GITHUB_OUTPUT', '').strip()
+              if output:
+                  with open(output, 'a') as handle:
+                      handle.write('slack_reported=true\n')
           PY
       - name: Retain logs, manifests, upload/selection evidence and validation reports
         if: always()
@@ -170,3 +189,41 @@ jobs:
             ${{ runner.temp }}/termination-${{ github.run_id }}-${{ github.run_attempt }}/analysis/run-report.json
             ${{ runner.temp }}/termination-${{ github.run_id }}-${{ github.run_attempt }}/release/manifest.json
           if-no-files-found: warn
+
+  report-unalerted-failure:
+    needs: candidate
+    if: "(failure() || cancelled()) && needs.candidate.outputs.slack_reported != 'true'"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: scimap-candidates
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: analysis
+          persist-credentials: false
+      - name: Alert when the candidate job died without reporting
+        working-directory: analysis
+        env:
+          SCIMAP_ALERT_WEBHOOK_URL: ${{ secrets.SCIMAP_ALERT_WEBHOOK_URL }}
+          CANDIDATE_RESULT: ${{ needs.candidate.result }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          sys.path.insert(0, 'scripts')
+          import alerts
+          result = os.environ.get('CANDIDATE_RESULT', 'failure')
+          webhook = alerts.webhook_from_env()
+          text = alerts.message(
+              'error',
+              f'Candidate job {result} before it reported',
+              {'result': result},
+              [
+                  'The candidate runner ended without recording a Slack alert.',
+                  'Nothing in this job writes a selection pointer.',
+                  'Inspect the run before retrying. Use a new release ID if any objects were uploaded.',
+              ],
+          )
+          if not alerts.send(webhook, text):
+              sys.exit(1)
+          PY

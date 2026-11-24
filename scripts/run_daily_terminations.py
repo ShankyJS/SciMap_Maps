@@ -12,11 +12,18 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 import uuid
 
 import alerts
 
 ROOT = Path(__file__).resolve().parent.parent
+# Directory whose `aws` command is the stdlib client. Publication children see
+# it first on PATH; the pinned publisher still decides what to upload. The
+# publish stage points that client at a per-run pool so its one-at-a-time
+# puts overlap without editing the pinned publisher.
+PUBLISHER_AWS = Path(__file__).resolve().parent / 'publisher_aws'
 # Names the AWS CLI publisher reads. RCLONE_CONFIG_R2_* is not an input.
 PUBLICATION_NAMES = ('R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT', 'R2_ACCOUNT_ID')
 
@@ -83,16 +90,119 @@ def child_environment(publish=False):
     env['RCLONE_CONFIG_R2_SECRET_ACCESS_KEY'] = secret
     env['RCLONE_CONFIG_R2_ENDPOINT'] = endpoint
     env['RCLONE_CONFIG_R2_NO_CHECK_BUCKET'] = 'true'
+    env['PATH'] = str(PUBLISHER_AWS) + os.pathsep + env.get('PATH', '')
     return env
 
 
+def publish_pool_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('scimap_publish_pool', PUBLISHER_AWS / 'publish_pool.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def publish_concurrency():
+    """Worker count for the publish pool. Fail before any upload when it is unusable."""
+    try:
+        value = publish_pool_module().concurrency_from_env(os.environ.get('SCIMAP_PUBLISH_CONCURRENCY'))
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    return str(value)
+
+
+def stop_publish_pool(pool_dir):
+    """Ask the local pool to exit. A missing pool has nothing to stop."""
+    if pool_dir is None or not (Path(pool_dir) / 'port').is_file():
+        return
+    try:
+        subprocess.run(
+            [sys.executable, '-S', str(PUBLISHER_AWS / 'r2_s3api.py'), '--shutdown', str(pool_dir)],
+            timeout=150,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+
+
+def note(text):
+    """Progress for the job log. Stage files are not uploaded if the runner dies."""
+    print(text, file=sys.stderr, flush=True)
+
+
+def mark_slack_reported():
+    """Tell the follow-up job that this step already posted to Slack."""
+    path = os.environ.get('GITHUB_OUTPUT', '').strip()
+    if not path:
+        return
+    with open(path, 'a') as handle:
+        handle.write('slack_reported=true\n')
+
+
 def execute(command, log, publish=False):
-    # Line streaming keeps detailed institution diagnostics in the stage log.
-    with log.open('w') as output:
-        result = subprocess.run(list(map(str, command)), stdout=output, stderr=subprocess.STDOUT, env=child_environment(publish))
-    if result.returncode:
+    # The child log stays on disk for the artifact. A heartbeat also goes to
+    # stderr, which GitHub streams, so a lost runner still leaves progress.
+    env = child_environment(publish)
+    pool_dir = None
+    # Only the publisher uses the pool. The selector is also a publication
+    # child and must not attach to the upload pool or change its accounting.
+    if publish and log.stem == 'publish':
+        env['SCIMAP_PUBLISH_CONCURRENCY'] = publish_concurrency()
+        pool_dir = log.parent / 'publish-pool'
+        pool_dir.mkdir(parents=True, exist_ok=True)
+        env['SCIMAP_PUBLISH_POOL_DIR'] = str(pool_dir)
+    process = subprocess.Popen(
+        list(map(str, command)),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+    )
+    state = {'last': ''}
+
+    def pump():
+        with log.open('wb') as output:
+            assert process.stdout is not None
+            while True:
+                raw = process.stdout.readline()
+                if not raw:
+                    break
+                output.write(raw)
+                output.flush()
+                text = raw.decode('utf-8', 'replace').strip()
+                if text:
+                    state['last'] = text[-300:]
+
+    thread = threading.Thread(target=pump)
+    thread.start()
+    started = time.monotonic()
+    note(f'stage {log.stem} starting')
+    try:
+        while True:
+            try:
+                code = process.wait(timeout=20)
+                break
+            except subprocess.TimeoutExpired:
+                size = log.stat().st_size if log.exists() else 0
+                last = f' last={state["last"]}' if state['last'] else ''
+                note(f'stage {log.stem} running {int(time.monotonic() - started)}s log_bytes={size}{last}')
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        if process.stdout:
+            process.stdout.close()
+        thread.join(timeout=5)
+        stop_publish_pool(pool_dir)
+        raise
+    thread.join()
+    if process.stdout:
+        process.stdout.close()
+    stop_publish_pool(pool_dir)
+    if code:
         detail = log.read_text(errors='replace')[-1500:]
-        raise RuntimeError(f'Exit {result.returncode}; see {log.name}\n{detail}')
+        raise RuntimeError(f'Exit {code}; see {log.name}\n{detail}')
+    note(f'stage {log.stem} passed')
 
 
 def run(args, executor=execute):
@@ -109,6 +219,7 @@ def run(args, executor=execute):
     analysis, release = work / 'analysis', work / 'release'
     report = {'status': 'running', 'as_of': args.as_of, 'release_id': release_id,
               'historical': args.historical, 'publish': args.publish, 'stages': [], 'website_selection_changed': False}
+    note(f'daily candidate release_id={release_id} publish={args.publish} historical={args.historical}')
     report_path = work / 'daily-report.json'
     stage = 'setup'
 
@@ -131,6 +242,7 @@ def run(args, executor=execute):
             # Fail before capture, upload, or either pointer write.
             stage = 'publish'
             require_publication_credentials()
+            publish_concurrency()
         if not args.source_snapshot:
             step('capture', [sys.executable, ROOT / 'scripts/capture_termination_sources.py', '--output', snapshot])
         step('science', [sys.executable, ROOT / 'scripts/run_termination_pipeline.py', '--as-of', args.as_of,
@@ -163,12 +275,13 @@ def run(args, executor=execute):
         report['status'] = 'passed'
         outcome = 'Candidate published' if args.publish else 'Local candidate built; nothing uploaded'
         url = alerts.ci_run_url()
-        alerts.send(webhook, '\n'.join(filter(None, [
+        if alerts.send(webhook, '\n'.join(filter(None, [
             f'{outcome}: {alerts.escape(release_id)}',
             f'Report: {alerts.escape(str(report_path))}',
             'Website selection was not changed.',
             f'<{url}|Open run and reports>' if url else '',
-        ])))
+        ]))):
+            mark_slack_reported()
     except BaseException as error:
         report['status'] = 'failed'
         report['failed_stage'] = stage
@@ -176,9 +289,10 @@ def run(args, executor=execute):
         if report['stages']:
             report['stages'][-1]['status'] = 'failed'
         # A publisher may have completed before a later pointer failure. Do not claim otherwise.
-        alerts.send(webhook, alerts.message('error', f'Termination daily run failed at {stage}',
+        if alerts.send(webhook, alerts.message('error', f'Termination daily run failed at {stage}',
                     {'release': release_id, 'report': str(report_path), 'stage': stage},
-                    [alerts.code_block(alerts.failure_reason(error)), 'Website selection was not changed. Inspect stage logs before retrying with a new release ID.']))
+                    [alerts.code_block(alerts.failure_reason(error)), 'Website selection was not changed. Inspect stage logs before retrying with a new release ID.'])):
+            mark_slack_reported()
         raise
     finally:
         report['finished_at'] = datetime.now(timezone.utc).isoformat()
