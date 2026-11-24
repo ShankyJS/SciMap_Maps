@@ -3,8 +3,8 @@
 The workflow is `.github/workflows/daily-terminations.yml`. It runs on a
 GitHub-hosted `ubuntu-latest` runner. No self-hosted runner is registered or
 required. It is safe to merge before secrets exist. The schedule stays off
-until `SCIMAP_DAILY_ENABLED=true`. A manual run stays off until
-`SCIMAP_RUNTIME_READY=true`. Publication stays off unless the run is scheduled
+until `SCIMAP_DAILY_ENABLED=true`. A manual candidate run stays off until
+`SCIMAP_RUNTIME_READY=true`. Candidate publication stays off unless the run is scheduled
 or the manual `publish` input is true. This document does not enable either
 flag and does not create GitHub secrets or variables.
 
@@ -28,10 +28,16 @@ rclone. `select_termination_release.py` at this pin still calls rclone for
 pointer reads and writes. The daily orchestrator derives the `r2` rclone remote
 from `R2_*` for publication children only.
 
+This pin is for the release scripts, not the deployed website. Neither
+workflow deploys website code, so the site can ship independently. When the
+release tools need a fix or the site requires a new dataset format, test the
+new tooling against the site and update the `clvcooke/scimap` checkout ref in
+both `daily-terminations.yml` and `select-termination-release.yml` together.
+
 Neither pointer moves unless a later selection command succeeds.
-`latest-validated.json` moves only after a non-historical publish whose upload
-record says `published`. `website-release.json` is never written by this
-workflow.
+The daily workflow only moves `latest-validated.json` after a non-historical
+publish with a durable `published` receipt. It never writes
+`website-release.json`; use the separate manual workflow below.
 
 ## Who sets the GitHub configuration
 
@@ -41,7 +47,7 @@ the values in the repository. This change does not set them.
 
 | Name | Kind | Who sets it | Purpose |
 | --- | --- | --- | --- |
-| `R2_ACCESS_KEY_ID` | Environment secret | Repository admin | R2 access key with `GetObject` on `scimap-private-inputs/inputs/county_commute_NIH.csv`. Publication uses the same name. |
+| `R2_ACCESS_KEY_ID` | Environment secret | Repository admin | R2 access key for the county input, private release records, and publication/selection in `scimap-data`. See access requirements below. |
 | `R2_SECRET_ACCESS_KEY` | Environment secret | Repository admin | R2 secret key for that same access key. |
 | `SCIMAP_ALERT_WEBHOOK_URL` | Environment secret | Repository admin | Slack incoming webhook for `#scimap-alerts`. Required for failure alerts. |
 | `R2_ENDPOINT` | Workflow env, not a secret | Already pinned in the workflow | `https://17067e7373bbfee2043fe5186d66aeb9.r2.cloudflarestorage.com` |
@@ -100,7 +106,9 @@ those paths.
 5. Set `publish` true only when an immutable upload is intended. A missing or blank R2 secret fails at the fetch step before capture. The Slack alert names `Daily input fetch`, and neither pointer is written. If fetch succeeded, the same credentials are present for publication.
 6. Set `historical` true to keep `latest-validated` where it is. `publish` must also be true if the immutable objects should be stored. Historical never selects a pointer.
 
-The concurrency group `termination-release-publication` does not cancel an active upload.
+The daily and selection workflows share `termination-release-publication`, so
+selection cannot race an active publish. GitHub can replace an older pending
+run with a newer one. Dispatch one selection at a time.
 
 ## Staging release only
 
@@ -108,11 +116,68 @@ A staging publication stores a new immutable release and does not change the web
 
 Use a new release id on every attempt. The orchestrator generates one. Do not rerun an id that already has objects.
 
-After the run, download the artifact. `upload-record.json` must say `"status": "published"` and `"transport": "aws-cli"`. `selection-record.json` must be absent. Fetch the public manifest and compare its SHA-256 to `manifest_sha256` in the upload record. The live site keeps showing the previous `website-release` selection.
+The daily workflow saves `upload-record.json` in the run artifact and at
+`s3://scimap-private-inputs/records/releases/<release-id>/upload-record.json`
+for every published release, including historical ones. The receipt must say
+`"status": "published"` and `"transport": "aws-cli"`. `selection-record.json`
+must be absent on a historical run. To independently verify the upload, fetch
+the public manifest and compare its SHA-256 to `manifest_sha256` in the receipt.
+The website selection is unchanged.
+
+If `retain-upload-record` fails, the release may already exist publicly. The
+daily run fails before moving `latest-validated`. Inspect the retained artifact
+and restore private `PutObject` access; don't try to overwrite the immutable release.
 
 ## Promote and roll back
 
-Promotion and rollback are explicit selector commands from a clean checkout of website `ca167515757a295df811d8a9df7a40b80a3c1f37`. They are not done by leaving `historical` false on the first staging upload. Export the rclone remote from the same R2 values in a private shell. Do not commit them.
+1. In `scienceimpacts/SciMap_Maps`, go to **Actions → Publish or roll back
+   website dataset → Run workflow**. GitHub only offers the button once
+   `.github/workflows/select-termination-release.yml` is on the default branch.
+2. Enter the exact `release_id` from the Slack alert or daily run log. Leave
+   `pointer` at `website-release` to change what the site displays. Use
+   `latest-validated` only to change the daily pointer; it refuses older cutoffs.
+3. Enter the actual `approved_by` and `reason` (both required for website
+   selection, even for a dry run). The pinned selector includes these values
+   in the public pointer, so don't enter credentials or private notes.
+4. Leave `dry_run` checked and run it. Check `previous` and `selection` in the
+   step log, or review the old and proposed release IDs in `#scimap-alerts`.
+   No R2 pointer or record is written on a dry run.
+5. To apply, dispatch with the same inputs and uncheck `dry_run`. Wait for
+   success before dispatching again. The selector checks the updated contents
+   through both the authenticated R2 origin and the public URL. The run posts
+   to `#scimap-alerts` and retains `selection-record.json` as an artifact and
+   in `scimap-private-inputs/records/selections/<pointer>/<run-id>-<attempt>.json`.
+   Rollback is the same button, with the earlier approved release ID.
+
+No artifact is needed for releases with durable receipts. For older releases
+only, enter `legacy_run_id`; it is used if the private receipt is missing. The
+run must still have its original, unexpired artifact. The workflow verifies that
+the receipt is for the exact requested release. These two legacy receipts were
+verified in the following runs:
+
+| Release ID | `legacy_run_id` |
+| --- | --- |
+| `2026-11-24-daily-20261124T162915Z-02777460` | `45436300310` |
+| `2026-11-24-daily-20261124T194615Z-59d0ad1c` | `45472389609` |
+
+The existing `scimap-candidates` R2 key must have `GetObject`/`PutObject` on
+`scimap-private-inputs/records/*` in addition to its county input read access
+and `ListBucket`, `GetObject`, and `PutObject` access for publication/selection
+in `scimap-data`. The key must be able to distinguish a missing private record
+from denied access; the workflow does not fall back on a permissions error.
+
+A red run does not imply the old pointer is still live. An `unconfirmed`
+record means the pointer write started but verification did not finish. A
+`selected` record means the pointer was verified even if a later audit upload
+or Slack notification failed. Read the public pointer before retrying.
+
+### Manual fallback
+
+If GitHub Actions is unavailable, use the original selector from a clean
+website checkout at `ca167515757a295df811d8a9df7a40b80a3c1f37`. Coordinate
+with the daily/selection workflow operators so no publish or selection runs in
+parallel. Retrieve the receipt from private records or an archived artifact.
+Export the remote from the same R2 values in a private shell. Do not commit them.
 
 ```sh
 export RCLONE_CONFIG_R2_TYPE=s3
@@ -133,14 +198,15 @@ python scripts/select_termination_release.py \
 
 That dry run prints the prepared selection and does not write. Add `--apply --record /new/selection-A.json` only for the authorized write. The record path must be new. An `unconfirmed` record means the write result is unknown: read the pointer back and do not retry that record.
 
-A-B-A, after two published upload records exist:
+Website rollback uses the earlier approved upload record and a new record
+path; it does not rebuild data:
 
-1. Record pointer A: save the current `latest-validated.json` body and its `release_id`.
-2. Apply B with B's upload record and a new `--record` path. Read the public pointer back. It must equal B, and the site pointer `website-release.json` must still equal its previous value.
-3. Apply A again with A's original upload record and another new `--record` path. Read the public pointer back. It must equal the body saved in step 1.
-4. If B's cutoff is older than the current `latest-validated` `as_of`, the selector refuses the backwards move. Use a pointer that does not trip that guard, or demonstrate A-B-A on a pointer whose current `as_of` is not newer than B. Do not use this refusal as a reason to edit the pointer by hand.
-
-Rollback of `website-release` is the same command with `--pointer website-release`, the earlier approved upload record, a new record path, and the actual approver and reason. It does not rebuild data.
+```sh
+python scripts/select_termination_release.py \
+  --upload-record /path/to/earlier/upload-record.json \
+  --pointer website-release --apply --record /new/rollback.json \
+  --approved-by 'Actual approver' --reason 'Reason for rollback'
+```
 
 ## Failure notification
 
@@ -198,5 +264,5 @@ Live steps, in order, when the window is open:
 1. Manual run with `publish=false` and the secrets present. This is the memory and time check. Confirm the scientific report passed, no upload or selection record exists, and the job finishes inside 180 minutes without running out of disk or memory.
 2. Manual run with `publish=true`, `historical=true`, and a fresh cutoff. This is the staging release. Confirm `upload-record.json` is `published` with `transport` `aws-cli`, `selection-record.json` is absent, and both public pointers are unchanged.
 3. Forced schema failure: copy an approved snapshot, delete the `spent_at_disruption` column from `nih_v3_terminations.csv`, and run with `--source-snapshot` pointing at that copy, `--publish`, and `--notify`. The run must fail at `science`, alert as above, and leave both pointers unchanged. Do not repair the snapshot in place. Use a new output directory for the corrected rerun.
-4. A-B-A on `latest-validated` only, using the selector commands above. Save A, apply B, read it back, apply A, read it back. `website-release.json` stays on its previous release for the whole demonstration.
+4. For the daily workflow drill, do A-B-A on `latest-validated` only, using releases with the same cutoff or applying the manual checks in an isolated staging deployment. Save A, apply B and check its public `release_id`, then apply A and check it again. The selector refuses older cutoffs; do not work around the guard. `website-release.json` stays unchanged for this daily drill. Test the new website button separately, before the frontend switches to the live pointer, or in a team-approved window.
 5. Team sign-off before anyone sets `SCIMAP_DAILY_ENABLED=true`.
