@@ -41,11 +41,18 @@ def workflow_checks(text, fetch_text):
             'manual runs stay behind SCIMAP_RUNTIME_READY and do not read SCIMAP_INPUT_ROOT',
         ),
         'hosted_runner': check(
-            text.count('runs-on: ubuntu-latest') == 2
+            text.count('runs-on: ubuntu-latest') == 3
             and 'self-hosted' not in text
             and 'timeout-minutes: 180' in text
             and 'actions: write' in text,
-            'preflight and candidate use ubuntu-latest; candidate keeps the 180 minute timeout and cache permission',
+            'hosted jobs use ubuntu-latest; candidate keeps the 180 minute timeout and cache permission',
+        ),
+        'unalerted_failure': check(
+            'report-unalerted-failure:' in text
+            and 'failure() || cancelled()' in text
+            and "needs.candidate.outputs.slack_reported != 'true'" in text
+            and 'website-release' not in text,
+            'a fresh runner alerts only when the candidate died without reporting',
         ),
         'private_inputs': check(
             'scimap-private-inputs' in text
@@ -85,7 +92,7 @@ def tool_check():
 def safety_tests():
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite()
-    for name in ('test_run_daily_terminations', 'test_fetch_daily_inputs'):
+    for name in ('test_run_daily_terminations', 'test_fetch_daily_inputs', 'test_r2_s3api'):
         suite.addTests(loader.loadTestsFromName(name))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     names = []

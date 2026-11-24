@@ -1,0 +1,6 @@
+#!/bin/sh
+# PATH stand-in for the pinned publisher. It execs the stdlib S3 client so
+# each object does not start AWS CLI v2. Unrecognized commands fall through.
+set -eu
+here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+exec python3 "$here/r2_s3api.py" "$@"
