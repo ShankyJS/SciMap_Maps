@@ -13,23 +13,28 @@ When SCIMAP_PUBLISH_POOL_DIR is set, non-manifest puts are queued on a local
 pool with a fixed worker count (SCIMAP_PUBLISH_CONCURRENCY, default 32). The
 manifest put, and any list or get, waits until those puts have succeeded. A
 failed put is returned on the next call and the manifest is not uploaded.
+A connect failure or a 429/5xx response is retried. A retried put that finds
+the object already stored succeeds only when that object's MD5 matches.
 Credentials and the endpoint come from the publisher's own command line and
 environment. They are never printed.
 """
+import errno
 import fcntl
 import hashlib
 import hmac
 import json
 import os
 from pathlib import Path
+import random
 import socket
 import subprocess
 import sys
+import threading
 import time
 from urllib.parse import quote
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
-from http.client import HTTPConnection, HTTPSConnection
+from http.client import BadStatusLine, HTTPConnection, HTTPSConnection, IncompleteRead
 from urllib.parse import urlsplit
 
 # The pool module sits next to this file. Put that directory first so a
@@ -47,6 +52,15 @@ VALUE_FLAGS = {
 }
 BOOL_FLAGS = {'--no-paginate', '--no-cli-pager', '--no-cli-auto-prompt'}
 EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+TRANSIENT_ATTEMPTS = 5
+_TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
+_RETRYABLE_ERRNOS = frozenset({
+    errno.EAGAIN, errno.ECONNABORTED, errno.ECONNREFUSED, errno.ECONNRESET,
+    errno.EHOSTDOWN, errno.EHOSTUNREACH, errno.ENETDOWN, errno.ENETUNREACH,
+    errno.EPIPE, errno.ETIMEDOUT, errno.EWOULDBLOCK,
+})
+_retry_count = 0
+_retry_count_lock = threading.Lock()
 
 
 class S3Error(RuntimeError):
@@ -166,7 +180,45 @@ def credentials():
     return access, secret, token or None
 
 
-def transmit(method, endpoint, region, bucket, key, query, extra_headers, body_path):
+def retry_count():
+    with _retry_count_lock:
+        return _retry_count
+
+
+def _count_retry():
+    global _retry_count
+    with _retry_count_lock:
+        _retry_count += 1
+
+
+def _retryable_oserror(error):
+    if isinstance(error, (TimeoutError, ConnectionError, socket.gaierror)):
+        return True
+    return getattr(error, 'errno', None) in _RETRYABLE_ERRNOS
+
+
+def _pause(attempt):
+    time.sleep(min(8.0, 0.25 * (2 ** attempt)) + random.uniform(0, 0.05))
+
+
+def _etag_matches_file(etag, path):
+    """True when the service ETag is the MD5 of this file. Multipart ETags do not match."""
+    if not etag or not path:
+        return False
+    text = etag.strip()
+    if text[:2].upper() == 'W/':
+        text = text[2:].strip()
+    text = text.strip('"')
+    if '-' in text:
+        return False
+    digest = hashlib.md5()
+    with open(path, 'rb') as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(block)
+    return text == digest.hexdigest()
+
+
+def transmit_once(method, endpoint, region, bucket, key, query, extra_headers, body_path):
     access, secret, token = credentials()
     parts = urlsplit(endpoint)
     if parts.scheme not in ('https', 'http') or not parts.hostname:
@@ -204,6 +256,51 @@ def transmit(method, endpoint, region, bucket, key, query, extra_headers, body_p
     finally:
         connection.close()
     return status, response_headers, payload
+
+
+def _confirm_stored_put(endpoint, region, bucket, key, body_path):
+    """A retried create-only put got 412. Accept it only when the stored MD5 is this file."""
+    status, headers, _payload = transmit(
+        'GET', endpoint, region, bucket, key, {}, {}, None,
+    )
+    if status == 200 and _etag_matches_file(headers.get('etag', ''), body_path):
+        return 200, headers, b''
+    return None
+
+
+def transmit(method, endpoint, region, bucket, key, query, extra_headers, body_path):
+    """Send one signed request. Retry a dropped connection or a transient status.
+
+    The first 412 is a conflict and is returned as-is. A 412 from a later attempt
+    can mean the previous attempt stored the object and the response was lost.
+    """
+    last_status = None
+    for attempt in range(TRANSIENT_ATTEMPTS):
+        try:
+            status, headers, payload = transmit_once(
+                method, endpoint, region, bucket, key, query, extra_headers, body_path,
+            )
+        except (OSError, BadStatusLine, IncompleteRead) as error:
+            if isinstance(error, OSError) and not _retryable_oserror(error):
+                raise
+            if attempt + 1 == TRANSIENT_ATTEMPTS:
+                raise
+            _count_retry()
+            _pause(attempt)
+            continue
+        if status in _TRANSIENT_STATUS and attempt + 1 < TRANSIENT_ATTEMPTS:
+            _count_retry()
+            _pause(attempt)
+            last_status = (status, headers, payload)
+            continue
+        if method == 'PUT' and status == 412 and attempt > 0 and body_path:
+            confirmed = _confirm_stored_put(endpoint, region, bucket, key, body_path)
+            if confirmed is not None:
+                return confirmed
+        return status, headers, payload
+    if last_status is not None:
+        return last_status
+    raise S3Error('request failed before a response')
 
 
 def error_text(payload):
@@ -536,10 +633,11 @@ def dispatch_argv(pool, argv):
     if operation == 'put-object':
         kind = pool.put(put_request(flags, bools, positionals))
         stats = pool.stats()
-        payload = {'ok': True, 'accepted': stats['accepted']}
+        payload = {'ok': True, 'accepted': stats['accepted'], 'retries': retry_count()}
         if kind == 'manifest':
             payload['note'] = (
-                f'publish pool concurrency={stats["concurrency"]} uploaded={stats["uploaded"]}'
+                f'publish pool concurrency={stats["concurrency"]} uploaded={stats["uploaded"]} '
+                f'retries={retry_count()}'
             )
         return payload
     if operation == 'get-object':
@@ -553,7 +651,10 @@ def dispatch_argv(pool, argv):
     return {
         'ok': True,
         'json': parse_list(payload),
-        'note': f'publish pool concurrency={stats["concurrency"]} uploaded={stats["uploaded"]}',
+        'note': (
+            f'publish pool concurrency={stats["concurrency"]} uploaded={stats["uploaded"]} '
+            f'retries={retry_count()}'
+        ),
     }
 
 
@@ -658,8 +759,10 @@ def pooled_main(argv):
     if isinstance(note, str) and note:
         print(note, file=sys.stderr, flush=True)
     accepted = response.get('accepted')
+    retries = response.get('retries')
     if isinstance(accepted, int) and accepted and accepted % 1000 == 0 and not note:
-        print(f'publish pool accepted={accepted}', file=sys.stderr, flush=True)
+        retry_note = f' retries={retries}' if isinstance(retries, int) and retries else ''
+        print(f'publish pool accepted={accepted}{retry_note}', file=sys.stderr, flush=True)
     return 0
 
 

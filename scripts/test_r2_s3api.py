@@ -1,4 +1,5 @@
 import base64
+import errno
 import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -203,6 +204,118 @@ class S3ApiTests(unittest.TestCase):
         with patch('r2_s3api.os.execv') as execv, patch('r2_s3api.real_aws_path', return_value='/usr/bin/aws'):
             self.assertEqual(r2_s3api.main(['--version']), 0)
         self.assertEqual(execv.call_args.args, ('/usr/bin/aws', ['/usr/bin/aws', '--version']))
+
+    def test_unreachable_network_is_retried(self):
+        calls = []
+
+        def once(method, endpoint, region, bucket, key, query, headers, body_path):
+            calls.append(method)
+            if len(calls) == 1:
+                raise OSError(errno.ENETUNREACH, 'Network is unreachable')
+            return 200, {'etag': '"abc"'}, b'ok'
+
+        with patch.object(r2_s3api, 'transmit_once', once), patch.object(r2_s3api, '_pause'):
+            status, _headers, payload = r2_s3api.transmit(
+                'GET', 'https://example.invalid', 'auto', 'scimap-data', 'k', {}, {}, None,
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, b'ok')
+        self.assertEqual(calls, ['GET', 'GET'])
+
+    def test_client_error_and_local_oserror_are_not_retried(self):
+        calls = []
+
+        def once(method, endpoint, region, bucket, key, query, headers, body_path):
+            calls.append(status_code)
+            return status_code, {}, b'no'
+
+        status_code = 400
+        with patch.object(r2_s3api, 'transmit_once', once), patch.object(r2_s3api, '_pause'):
+            status, _headers, _payload = r2_s3api.transmit(
+                'GET', 'https://example.invalid', 'auto', 'scimap-data', 'k', {}, {}, None,
+            )
+        self.assertEqual(status, 400)
+        self.assertEqual(calls, [400])
+
+        def missing(*_args):
+            raise OSError(errno.ENOENT, 'No such file')
+
+        with patch.object(r2_s3api, 'transmit_once', missing), patch.object(r2_s3api, '_pause'):
+            with self.assertRaises(OSError) as raised:
+                r2_s3api.transmit(
+                    'GET', 'https://example.invalid', 'auto', 'scimap-data', 'k', {}, {}, None,
+                )
+        self.assertEqual(raised.exception.errno, errno.ENOENT)
+
+    def test_retry_budget_is_finite(self):
+        calls = []
+
+        def once(*_args):
+            calls.append(1)
+            raise OSError(errno.ENETUNREACH, 'Network is unreachable')
+
+        with patch.object(r2_s3api, 'transmit_once', once), patch.object(r2_s3api, '_pause'):
+            with self.assertRaises(OSError):
+                r2_s3api.transmit(
+                    'LIST', 'https://example.invalid', 'auto', 'scimap-data', '', {}, {}, None,
+                )
+        self.assertEqual(len(calls), r2_s3api.TRANSIENT_ATTEMPTS)
+
+    def test_retried_put_412_succeeds_only_when_the_stored_md5_matches(self):
+        body = Path(self.tmp.name) / 'object.bin'
+        body.write_bytes(b'county-row')
+        digest = hashlib.md5(b'county-row').hexdigest()
+        calls = []
+
+        def once(method, endpoint, region, bucket, key, query, headers, body_path):
+            calls.append(method)
+            if method == 'PUT' and calls.count('PUT') == 1:
+                raise OSError(errno.ECONNRESET, 'Connection reset')
+            if method == 'PUT':
+                return 412, {}, b'<Error><Code>PreconditionFailed</Code></Error>'
+            return 200, {'etag': f'"{digest}"'}, b'county-row'
+
+        with patch.object(r2_s3api, 'transmit_once', once), patch.object(r2_s3api, '_pause'):
+            status, _headers, payload = r2_s3api.transmit(
+                'PUT', 'https://example.invalid', 'auto', 'scimap-data', 'k', {},
+                {'content-md5': 'ignored', 'if-none-match': '*'}, str(body),
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, b'')
+        self.assertEqual(calls, ['PUT', 'PUT', 'GET'])
+
+        calls.clear()
+
+        def mismatch(method, endpoint, region, bucket, key, query, headers, body_path):
+            calls.append(method)
+            if method == 'PUT' and calls.count('PUT') == 1:
+                raise OSError(errno.ECONNRESET, 'Connection reset')
+            if method == 'PUT':
+                return 412, {}, b'exists'
+            return 200, {'etag': '"0123456789abcdef0123456789abcdef"'}, b'other'
+
+        with patch.object(r2_s3api, 'transmit_once', mismatch), patch.object(r2_s3api, '_pause'):
+            status, _headers, payload = r2_s3api.transmit(
+                'PUT', 'https://example.invalid', 'auto', 'scimap-data', 'k', {},
+                {'content-md5': 'ignored', 'if-none-match': '*'}, str(body),
+            )
+        self.assertEqual(status, 412)
+        self.assertEqual(payload, b'exists')
+
+    def test_first_put_412_is_not_reread(self):
+        calls = []
+
+        def once(method, endpoint, region, bucket, key, query, headers, body_path):
+            calls.append(method)
+            return 412, {}, b'exists'
+
+        with patch.object(r2_s3api, 'transmit_once', once), patch.object(r2_s3api, '_pause'):
+            status, _headers, _payload = r2_s3api.transmit(
+                'PUT', 'https://example.invalid', 'auto', 'scimap-data', 'k', {},
+                {'if-none-match': '*'}, str(Path(self.tmp.name) / 'object.bin'),
+            )
+        self.assertEqual(status, 412)
+        self.assertEqual(calls, ['PUT'])
 
 
 class PoolTests(unittest.TestCase):
