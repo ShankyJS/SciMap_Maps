@@ -1,6 +1,9 @@
 #!/bin/sh
 # PATH stand-in for the pinned publisher. It execs the stdlib S3 client so
-# each object does not start AWS CLI v2. Unrecognized commands fall through.
+# each object does not start AWS CLI v2. When SCIMAP_PUBLISH_POOL_DIR is set,
+# that client overlaps transfers on a fixed-size local pool. Other commands
+# fall through to the real AWS CLI.
 set -eu
 here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-exec python3 "$here/r2_s3api.py" "$@"
+# -S skips site startup. r2_s3api.py puts its own directory first on sys.path.
+exec python3 -S "$here/r2_s3api.py" "$@"

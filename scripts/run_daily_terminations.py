@@ -20,7 +20,9 @@ import alerts
 
 ROOT = Path(__file__).resolve().parent.parent
 # Directory whose `aws` command is the stdlib client. Publication children see
-# it first on PATH; the pinned publisher still decides what to upload.
+# it first on PATH; the pinned publisher still decides what to upload. The
+# publish stage points that client at a per-run pool so its one-at-a-time
+# puts overlap without editing the pinned publisher.
 PUBLISHER_AWS = Path(__file__).resolve().parent / 'publisher_aws'
 # Names the AWS CLI publisher reads. RCLONE_CONFIG_R2_* is not an input.
 PUBLICATION_NAMES = ('R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT', 'R2_ACCOUNT_ID')
@@ -92,6 +94,39 @@ def child_environment(publish=False):
     return env
 
 
+def publish_pool_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('scimap_publish_pool', PUBLISHER_AWS / 'publish_pool.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def publish_concurrency():
+    """Worker count for the publish pool. Fail before any upload when it is unusable."""
+    try:
+        value = publish_pool_module().concurrency_from_env(os.environ.get('SCIMAP_PUBLISH_CONCURRENCY'))
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    return str(value)
+
+
+def stop_publish_pool(pool_dir):
+    """Ask the local pool to exit. A missing pool has nothing to stop."""
+    if pool_dir is None or not (Path(pool_dir) / 'port').is_file():
+        return
+    try:
+        subprocess.run(
+            [sys.executable, '-S', str(PUBLISHER_AWS / 'r2_s3api.py'), '--shutdown', str(pool_dir)],
+            timeout=150,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+
+
 def note(text):
     """Progress for the job log. Stage files are not uploaded if the runner dies."""
     print(text, file=sys.stderr, flush=True)
@@ -109,11 +144,20 @@ def mark_slack_reported():
 def execute(command, log, publish=False):
     # The child log stays on disk for the artifact. A heartbeat also goes to
     # stderr, which GitHub streams, so a lost runner still leaves progress.
+    env = child_environment(publish)
+    pool_dir = None
+    # Only the publisher uses the pool. The selector is also a publication
+    # child and must not attach to the upload pool or change its accounting.
+    if publish and log.stem == 'publish':
+        env['SCIMAP_PUBLISH_CONCURRENCY'] = publish_concurrency()
+        pool_dir = log.parent / 'publish-pool'
+        pool_dir.mkdir(parents=True, exist_ok=True)
+        env['SCIMAP_PUBLISH_POOL_DIR'] = str(pool_dir)
     process = subprocess.Popen(
         list(map(str, command)),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        env=child_environment(publish),
+        env=env,
     )
     state = {'last': ''}
 
@@ -149,10 +193,12 @@ def execute(command, log, publish=False):
         if process.stdout:
             process.stdout.close()
         thread.join(timeout=5)
+        stop_publish_pool(pool_dir)
         raise
     thread.join()
     if process.stdout:
         process.stdout.close()
+    stop_publish_pool(pool_dir)
     if code:
         detail = log.read_text(errors='replace')[-1500:]
         raise RuntimeError(f'Exit {code}; see {log.name}\n{detail}')
@@ -196,6 +242,7 @@ def run(args, executor=execute):
             # Fail before capture, upload, or either pointer write.
             stage = 'publish'
             require_publication_credentials()
+            publish_concurrency()
         if not args.source_snapshot:
             step('capture', [sys.executable, ROOT / 'scripts/capture_termination_sources.py', '--output', snapshot])
         step('science', [sys.executable, ROOT / 'scripts/run_termination_pipeline.py', '--as-of', args.as_of,

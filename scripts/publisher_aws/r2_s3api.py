@@ -2,23 +2,42 @@
 """Stdlib S3 client for the pinned termination publisher.
 
 publish_termination_release.py at the pinned website revision shells out to
-`aws s3api` once per object. Starting AWS CLI v2 that many times exhausts a
-GitHub-hosted runner. This process speaks the same flags and refuses any put
-that omits --if-none-match or --content-md5, and any list that omits
---no-paginate. Credentials and the endpoint come from the publisher's own
-command line and environment. They are never printed.
+`aws s3api` once per object and uploads manifest.json only after every other
+object has been stored and verified. Starting AWS CLI v2 that many times
+exhausts a GitHub-hosted runner, and doing the transfers one by one makes a
+12,000-object release take longer than the job budget allows.
+
+This process speaks the same flags. It refuses any put that omits
+--if-none-match * or --content-md5, and any list that omits --no-paginate.
+When SCIMAP_PUBLISH_POOL_DIR is set, non-manifest puts are queued on a local
+pool with a fixed worker count (SCIMAP_PUBLISH_CONCURRENCY, default 32). The
+manifest put, and any list or get, waits until those puts have succeeded. A
+failed put is returned on the next call and the manifest is not uploaded.
+Credentials and the endpoint come from the publisher's own command line and
+environment. They are never printed.
 """
+import fcntl
 import hashlib
 import hmac
 import json
 import os
 from pathlib import Path
+import socket
+import subprocess
 import sys
+import time
 from urllib.parse import quote
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
 from http.client import HTTPConnection, HTTPSConnection
 from urllib.parse import urlsplit
+
+# The pool module sits next to this file. Put that directory first so a
+# PYTHONPATH entry cannot shadow it, including when Python is started with -S.
+_CLIENT_DIR = str(Path(__file__).resolve().parent)
+if sys.path[:1] != [_CLIENT_DIR]:
+    sys.path.insert(0, _CLIENT_DIR)
+from publish_pool import PoolError, TransferPool, concurrency_from_env
 
 HANDLED = {'put-object', 'get-object', 'list-objects-v2'}
 VALUE_FLAGS = {
@@ -257,59 +276,46 @@ def parse_list(payload):
     return page
 
 
-def put_object(flags, bools, positionals):
+def put_request(flags, bools, positionals):
     if positionals:
         raise S3Error('refusing put-object with unexpected arguments')
     if '--if-none-match' not in flags:
         raise S3Error('refusing put-object without --if-none-match')
+    if flags.get('--if-none-match') != '*':
+        raise S3Error('refusing put-object unless --if-none-match is *')
     if '--content-md5' not in flags:
         raise S3Error('refusing put-object without --content-md5')
-    bucket = require(flags, '--bucket')
-    key = require(flags, '--key')
     body = require(flags, '--body')
-    endpoint = require(flags, '--endpoint-url')
-    region = require(flags, '--region')
     if not Path(body).is_file():
         raise S3Error('put-object body is not a file')
-    status, _headers, payload = transmit(
-        'PUT', endpoint, region, bucket, key, {},
-        {
-            'content-md5': flags['--content-md5'],
-            'content-type': 'application/octet-stream',
-            'if-none-match': flags['--if-none-match'],
-        },
-        body,
-    )
-    if status != 200:
-        raise S3Error(f'put-object failed with HTTP {status}: {error_text(payload)}')
-    return 0
+    return {
+        'bucket': require(flags, '--bucket'),
+        'key': require(flags, '--key'),
+        'endpoint': require(flags, '--endpoint-url'),
+        'region': require(flags, '--region'),
+        'body': body,
+        'content_md5': flags['--content-md5'],
+        'if_none_match': '*',
+    }
 
 
-def get_object(flags, bools, positionals):
+def get_request(flags, bools, positionals):
     if len(positionals) != 1:
         raise S3Error('get-object requires the output file')
-    bucket = require(flags, '--bucket')
-    key = require(flags, '--key')
-    endpoint = require(flags, '--endpoint-url')
-    region = require(flags, '--region')
-    outfile = Path(positionals[0])
-    status, headers, payload = transmit('GET', endpoint, region, bucket, key, {}, {}, None)
-    if status != 200:
-        raise S3Error(f'get-object failed with HTTP {status}: {error_text(payload)}')
-    outfile.parent.mkdir(parents=True, exist_ok=True)
-    outfile.write_bytes(payload)
-    sys.stdout.write(json.dumps({'ContentLength': len(payload), 'ETag': headers.get('etag', '')}) + '\n')
-    return 0
+    return {
+        'bucket': require(flags, '--bucket'),
+        'key': require(flags, '--key'),
+        'endpoint': require(flags, '--endpoint-url'),
+        'region': require(flags, '--region'),
+        'outfile': positionals[0],
+    }
 
 
-def list_objects(flags, bools, positionals):
+def list_request(flags, bools, positionals):
     if positionals:
         raise S3Error('refusing list-objects-v2 with unexpected arguments')
     if '--no-paginate' not in bools:
         raise S3Error('refusing list-objects-v2 without --no-paginate')
-    bucket = require(flags, '--bucket')
-    endpoint = require(flags, '--endpoint-url')
-    region = require(flags, '--region')
     query = {'list-type': '2'}
     if '--prefix' in flags:
         query['prefix'] = flags['--prefix']
@@ -317,11 +323,69 @@ def list_objects(flags, bools, positionals):
         query['max-keys'] = flags['--max-keys']
     if '--continuation-token' in flags:
         query['continuation-token'] = flags['--continuation-token']
-    status, _headers, payload = transmit('GET', endpoint, region, bucket, '', query, {}, None)
+    return {
+        'bucket': require(flags, '--bucket'),
+        'endpoint': require(flags, '--endpoint-url'),
+        'region': require(flags, '--region'),
+        'query': query,
+    }
+
+
+def put_headers(job):
+    return {
+        'content-md5': job['content_md5'],
+        'content-type': 'application/octet-stream',
+        'if-none-match': job['if_none_match'],
+    }
+
+
+def put_object(flags, bools, positionals):
+    job = put_request(flags, bools, positionals)
+    status, _headers, payload = transmit(
+        'PUT', job['endpoint'], job['region'], job['bucket'], job['key'], {}, put_headers(job), job['body'],
+    )
+    if status != 200:
+        raise S3Error(f'put-object failed with HTTP {status}: {error_text(payload)}')
+    return 0
+
+
+def get_object(flags, bools, positionals):
+    job = get_request(flags, bools, positionals)
+    status, headers, payload = transmit(
+        'GET', job['endpoint'], job['region'], job['bucket'], job['key'], {}, {}, None,
+    )
+    if status != 200:
+        raise S3Error(f'get-object failed with HTTP {status}: {error_text(payload)}')
+    outfile = Path(job['outfile'])
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    outfile.write_bytes(payload)
+    sys.stdout.write(json.dumps({'ContentLength': len(payload), 'ETag': headers.get('etag', '')}) + '\n')
+    return 0
+
+
+def list_objects(flags, bools, positionals):
+    spec = list_request(flags, bools, positionals)
+    status, _headers, payload = transmit(
+        'GET', spec['endpoint'], spec['region'], spec['bucket'], '', spec['query'], {}, None,
+    )
     if status != 200:
         raise S3Error(f'list-objects-v2 failed with HTTP {status}: {error_text(payload)}')
     sys.stdout.write(json.dumps(parse_list(payload)) + '\n')
     return 0
+
+
+def checked_operation(method, endpoint, region, bucket, key, query, headers, body):
+    """Pool transfer. Raises S3Error on a non-200 response and never prints credentials."""
+    if method == 'PUT':
+        what = 'put-object'
+    elif query:
+        what = 'list-objects-v2'
+    else:
+        what = 'get-object'
+    status, response_headers, payload = transmit(method, endpoint, region, bucket, key, query, headers, body)
+    if status != 200:
+        raise S3Error(f'{what} failed with HTTP {status}: {error_text(payload)}')
+    return response_headers, payload
 
 
 def handle(argv):
@@ -350,12 +414,267 @@ def fallthrough(argv):
     os.execv(real, [real, *argv])
 
 
+def pool_directory():
+    value = os.environ.get('SCIMAP_PUBLISH_POOL_DIR', '').strip()
+    return Path(value) if value else None
+
+
+def _read_line(conn, limit=8_000_000):
+    chunks = []
+    size = 0
+    while True:
+        try:
+            data = conn.recv(65536)
+        except socket.timeout as error:
+            raise S3Error('publish pool timed out') from error
+        if not data:
+            break
+        chunks.append(data)
+        size += len(data)
+        if b'\n' in data:
+            break
+        if size > limit:
+            raise S3Error('pool message is too large')
+    if not chunks:
+        raise S3Error('pool connection closed')
+    line, _separator, _rest = b''.join(chunks).partition(b'\n')
+    try:
+        message = json.loads(line)
+    except json.JSONDecodeError as error:
+        raise S3Error('pool message was not JSON') from error
+    if not isinstance(message, dict):
+        raise S3Error('pool message was not an object')
+    return message
+
+
+def _write_line(conn, message):
+    conn.sendall(json.dumps(message, separators=(',', ':')).encode('utf-8') + b'\n')
+
+
+def rpc(port, message, timeout):
+    try:
+        sock = socket.create_connection(('127.0.0.1', port), timeout=10)
+    except OSError as error:
+        raise S3Error('publish pool is not reachable') from error
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.settimeout(timeout)
+        _write_line(sock, message)
+        return _read_line(sock)
+    except OSError as error:
+        raise S3Error('publish pool connection failed') from error
+    finally:
+        sock.close()
+
+
+def _port_from(pool_dir):
+    try:
+        return int((Path(pool_dir) / 'port').read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _ping(port):
+    try:
+        return rpc(port, {'op': 'ping'}, timeout=2).get('ok') is True
+    except S3Error:
+        return False
+
+
+def ensure_server(pool_dir):
+    """Start the single local pool process. Later calls attach to it."""
+    pool_dir = Path(pool_dir)
+    pool_dir.mkdir(parents=True, exist_ok=True)
+    with open(pool_dir / 'lock', 'a+') as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        port = _port_from(pool_dir)
+        if port is not None and _ping(port):
+            return port
+        try:
+            (pool_dir / 'port').unlink()
+        except OSError:
+            pass
+        log_path = pool_dir / 'pool.log'
+        log_handle = open(log_path, 'ab', buffering=0)
+        try:
+            child_env = os.environ.copy()
+            child_env['PYTHONUNBUFFERED'] = '1'
+            proc = subprocess.Popen(
+                [sys.executable, '-S', str(Path(__file__).resolve()), '--serve', str(pool_dir)],
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=child_env,
+            )
+        finally:
+            log_handle.close()
+        try:
+            status = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired as error:
+            raise S3Error('publish pool did not detach') from error
+        if status != 0:
+            detail = log_path.read_text(errors='replace')[-500:]
+            raise S3Error(f'publish pool exited during start: {detail}')
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            port = _port_from(pool_dir)
+            if port is not None and _ping(port):
+                return port
+            time.sleep(0.02)
+        detail = log_path.read_text(errors='replace')[-500:]
+        raise S3Error(f'publish pool did not start: {detail}')
+
+
+def dispatch_argv(pool, argv):
+    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
+        raise S3Error('pool request arguments must be strings')
+    if not should_handle(argv):
+        raise S3Error('pool request is not a handled s3api call')
+    flags, bools, positionals = parse_args(argv[2:])
+    operation = argv[1]
+    if operation == 'put-object':
+        kind = pool.put(put_request(flags, bools, positionals))
+        stats = pool.stats()
+        payload = {'ok': True, 'accepted': stats['accepted']}
+        if kind == 'manifest':
+            payload['note'] = (
+                f'publish pool concurrency={stats["concurrency"]} uploaded={stats["uploaded"]}'
+            )
+        return payload
+    if operation == 'get-object':
+        return {'ok': True, 'json': pool.read_object(get_request(flags, bools, positionals))}
+    spec = list_request(flags, bools, positionals)
+    pool.wait_for_puts()
+    _headers, payload = pool.call(
+        'GET', spec['endpoint'], spec['region'], spec['bucket'], '', spec['query'], {}, None,
+    )
+    stats = pool.stats()
+    return {
+        'ok': True,
+        'json': parse_list(payload),
+        'note': f'publish pool concurrency={stats["concurrency"]} uploaded={stats["uploaded"]}',
+    }
+
+
+def _idle_limit():
+    try:
+        limit = int(os.environ.get('SCIMAP_PUBLISH_POOL_IDLE', '3600'))
+    except ValueError:
+        return 3600
+    return max(5, limit)
+
+
+def serve(pool_dir):
+    # The process that execs `aws` must be allowed to exit. Fork and leave the
+    # pool in its own session, then let that short-lived parent return.
+    if os.environ.get('SCIMAP_PUBLISH_POOL_FOREGROUND') != '1':
+        if os.fork() > 0:
+            os._exit(0)
+        os.setsid()
+    pool_dir = Path(pool_dir)
+    pool_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        concurrency = concurrency_from_env(os.environ.get('SCIMAP_PUBLISH_CONCURRENCY'))
+    except ValueError as error:
+        raise S3Error(str(error)) from error
+    pool = TransferPool(concurrency, checked_operation)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    idle_limit = _idle_limit()
+    try:
+        sock.bind(('127.0.0.1', 0))
+        sock.listen(256)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        (pool_dir / 'port').write_text(f'{sock.getsockname()[1]}\n')
+        (pool_dir / 'pid').write_text(f'{os.getpid()}\n')
+        sock.settimeout(30)
+        last = time.monotonic()
+        while True:
+            try:
+                conn, _addr = sock.accept()
+            except socket.timeout:
+                if pool.idle() and time.monotonic() - last >= idle_limit:
+                    break
+                continue
+            last = time.monotonic()
+            shutdown = False
+            try:
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                message = _read_line(conn)
+                op = message.get('op')
+                if op == 'ping':
+                    payload = {'ok': True, **pool.stats()}
+                elif op == 'shutdown':
+                    payload = {'ok': True}
+                    shutdown = True
+                elif op == 'call':
+                    payload = dispatch_argv(pool, message.get('argv'))
+                else:
+                    raise S3Error('unknown pool request')
+            except (S3Error, PoolError) as error:
+                payload = {'ok': False, 'error': str(error)}
+            except Exception as error:
+                detail = f'{type(error).__name__}: {error}'
+                payload = {'ok': False, 'error': detail[:300]}
+                print(f'publish pool failed: {detail[:300]}', file=sys.stderr)
+            try:
+                _write_line(conn, payload)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+            if shutdown:
+                break
+    finally:
+        pool.close(wait=False)
+        try:
+            (pool_dir / 'port').unlink()
+        except OSError:
+            pass
+        sock.close()
+    return 0
+
+
+def shutdown_pool(pool_dir):
+    port = _port_from(pool_dir)
+    if port is None:
+        return 0
+    try:
+        response = rpc(port, {'op': 'shutdown'}, timeout=150)
+    except S3Error:
+        return 0
+    return 0 if response.get('ok') else 1
+
+
+def pooled_main(argv):
+    port = ensure_server(pool_directory())
+    response = rpc(port, {'op': 'call', 'argv': list(map(str, argv))}, timeout=None)
+    if not response.get('ok'):
+        raise S3Error(response.get('error') or 'publish pool request failed')
+    if 'json' in response:
+        sys.stdout.write(json.dumps(response['json']) + '\n')
+    note = response.get('note')
+    if isinstance(note, str) and note:
+        print(note, file=sys.stderr, flush=True)
+    accepted = response.get('accepted')
+    if isinstance(accepted, int) and accepted and accepted % 1000 == 0 and not note:
+        print(f'publish pool accepted={accepted}', file=sys.stderr, flush=True)
+    return 0
+
+
 def main(argv):
     try:
+        if argv[:1] == ['--serve'] and len(argv) == 2:
+            return serve(argv[1])
+        if argv[:1] == ['--shutdown'] and len(argv) == 2:
+            return shutdown_pool(argv[1])
+        if should_handle(argv) and pool_directory() is not None:
+            return pooled_main(argv)
         if should_handle(argv):
             return handle(argv)
         fallthrough(argv)
-    except S3Error as error:
+    except (S3Error, PoolError) as error:
         print(f'r2 s3api: {error}', file=sys.stderr)
         return 1
     return 0
