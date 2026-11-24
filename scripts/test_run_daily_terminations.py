@@ -37,7 +37,7 @@ class DailyTests(unittest.TestCase):
                 (root / 'run/release').mkdir()
                 (root / 'run/release/manifest.json').write_text(json.dumps({'release_validation': {'status': 'passed', 'warnings': ['Guam missing geometry']}}))
             if log.stem == 'publish':
-                (root / 'run/upload-record.json').write_text('{"status":"published"}')
+                (root / 'run/upload-record.json').write_text('{"status":"published","release_id":"test"}')
         publish_env = {}
         if publish:
             publish_env = {
@@ -80,8 +80,8 @@ class DailyTests(unittest.TestCase):
 
     def test_success_publishes_then_advances_latest_only(self):
         calls, commands, report = self.exercise()
-        self.assertEqual([name for name, _ in calls], ['capture', 'science', 'build', 'publish', 'latest'])
-        self.assertEqual([credentials for _, credentials in calls], [False, False, False, True, True])
+        self.assertEqual([name for name, _ in calls], ['capture', 'science', 'build', 'publish', 'retain-upload-record', 'latest'])
+        self.assertEqual([credentials for _, credentials in calls], [False, False, False, True, True, True])
         self.assertEqual(report['status'], 'passed')
         self.assertFalse(report['website_selection_changed'])
         by_stage = dict(commands)
@@ -89,6 +89,10 @@ class DailyTests(unittest.TestCase):
         self.assertTrue(publish[1].endswith('publish_termination_release.py'))
         self.assertEqual(publish[3:5], ['--record', publish[4]])
         self.assertTrue(publish[4].endswith('upload-record.json'))
+        retain = by_stage['retain-upload-record']
+        self.assertEqual(retain[:12], ['aws', 's3api', 'put-object', '--bucket', 'scimap-private-inputs',
+                                      '--key', 'records/releases/test/upload-record.json', '--body', publish[4],
+                                      '--if-none-match', '*', '--content-md5'])
         latest = by_stage['latest']
         self.assertTrue(latest[1].endswith('select_termination_release.py'))
         self.assertEqual(latest[2:6], ['--upload-record', publish[4], '--pointer', 'latest-validated'])
@@ -96,7 +100,7 @@ class DailyTests(unittest.TestCase):
         self.assertTrue(latest[8].endswith('selection-record.json'))
 
     def test_each_failure_blocks_every_downstream_stage_and_alerts(self):
-        sequence = ['capture', 'science', 'build', 'publish', 'latest']
+        sequence = ['capture', 'science', 'build', 'publish', 'retain-upload-record', 'latest']
         for index, stage in enumerate(sequence):
             with self.subTest(stage=stage):
                 calls, _, report = self.exercise(fail=stage)
@@ -107,7 +111,7 @@ class DailyTests(unittest.TestCase):
 
     def test_historical_publication_skips_pointer(self):
         calls, _, _ = self.exercise(historical=True)
-        self.assertEqual(calls[-1][0], 'publish')
+        self.assertEqual(calls[-2:], [('publish', True), ('retain-upload-record', True)])
 
     def test_local_default_never_publishes(self):
         calls, _, _ = self.exercise(publish=False)

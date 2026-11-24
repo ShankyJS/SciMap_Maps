@@ -63,15 +63,15 @@ def warning_summary(validation):
     return [f"+ {len(validation['warnings'])} warning(s): {escape(names)}"]
 
 
-def message(level, title, context, lines=()):
-    icon = {"error": ":rotating_light:", "warning": ":warning:"}[level]
+def message(level, title, context, lines=(), *, run_label='Open the run and its run-report.json'):
+    icon = {"error": ":rotating_light:", "warning": ":warning:", "info": ":information_source:"}[level]
     header = f"{icon} *{escape(title)}*"
     details = " · ".join(
         "{}: `{}`".format(key, escape(str(value).replace("`", "'")))
         for key, value in context.items() if value
     )
     url = ci_run_url()
-    footer = f"<{url}|Open the run and its run-report.json>" if url else ""
+    footer = f"<{url}|{run_label}>" if url else ""
     body = "\n".join([header, details, *lines]).strip()
     limit = MAX_TEXT - len(footer) - 1
     if len(body) > limit:

@@ -6,7 +6,9 @@ website-release. Historical replays publish immutable files without pointers.
 Each stage has a retained log and failures stop all downstream work.
 """
 import argparse
+from base64 import b64encode
 from datetime import date, datetime, timezone
+from hashlib import md5
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,7 @@ import time
 import uuid
 
 import alerts
+from select_published_termination_release import RECORDS_BUCKET, upload_record_key
 
 ROOT = Path(__file__).resolve().parent.parent
 # Directory whose `aws` command is the stdlib client. Publication children see
@@ -242,6 +245,7 @@ def run(args, executor=execute):
             # Fail before capture, upload, or either pointer write.
             stage = 'publish'
             require_publication_credentials()
+            receipt_key = upload_record_key(release_id)
             publish_concurrency()
         if not args.source_snapshot:
             step('capture', [sys.executable, ROOT / 'scripts/capture_termination_sources.py', '--output', snapshot])
@@ -267,8 +271,15 @@ def run(args, executor=execute):
             # terminations/releases prefix. The publisher does not read rclone.
             step('publish', [args.release_python, scimap / 'scripts/publish_termination_release.py', release,
                  '--record', upload_record], publish=True)
-            if json.loads(upload_record.read_text()).get('status') != 'published':
-                raise RuntimeError('Publication not confirmed; pointers preserved')
+            receipt = upload_record.read_bytes()
+            record = json.loads(receipt)
+            if record.get('status') != 'published' or record.get('release_id') != release_id:
+                raise RuntimeError('Publication not confirmed for the requested release; pointers preserved')
+            _, _, _, endpoint = publication_settings()
+            step('retain-upload-record', ['aws', 's3api', 'put-object', '--bucket', RECORDS_BUCKET,
+                 '--key', receipt_key, '--body', upload_record, '--if-none-match', '*',
+                 '--content-md5', b64encode(md5(receipt, usedforsecurity=False).digest()).decode(),
+                 '--endpoint-url', endpoint, '--region', 'auto'], publish=True)
             if not args.historical:
                 step('latest', [args.release_python, scimap / 'scripts/select_termination_release.py', '--upload-record', upload_record,
                      '--pointer', 'latest-validated', '--apply', '--record', work / 'selection-record.json'], publish=True)
