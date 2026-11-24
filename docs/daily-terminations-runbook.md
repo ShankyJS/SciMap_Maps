@@ -28,6 +28,12 @@ rclone. `select_termination_release.py` at this pin still calls rclone for
 pointer reads and writes. The daily orchestrator derives the `r2` rclone remote
 from `R2_*` for publication children only.
 
+This pin is for the release scripts, not the deployed website. Neither
+workflow deploys website code, so the site can ship independently. When the
+release tools need a fix or the site requires a new dataset format, test the
+new tooling against the site and update the `clvcooke/scimap` checkout ref in
+both `daily-terminations.yml` and `select-termination-release.yml` together.
+
 Neither pointer moves unless a later selection command succeeds.
 The daily workflow only moves `latest-validated.json` after a non-historical
 publish with a durable `published` receipt. It never writes
