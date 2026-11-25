@@ -134,7 +134,8 @@ def run(args, webhook):
                     audit = json.loads(record.read_text())
                     aws_s3('put-object', RECORDS_BUCKET, '--key', key, '--body', record,
                            '--content-type', 'application/json', '--if-none-match', '*')
-        title = 'Termination pointer updated and verified' if args.apply else 'Termination selection dry run — no writes'
+        title = ('Termination release selected and verified' if args.apply
+                 else 'Termination selection preview — no writes')
     except BaseException as error:
         lines.append(alerts.code_block(alerts.failure_reason(error)))
         raise
@@ -143,7 +144,7 @@ def run(args, webhook):
             context.update({'old release': (audit['previous'] or {}).get('release_id', '(unset)'),
                             'selection status': audit['status']})
         sent = alerts.send(webhook, alerts.message('error' if lines else 'info', title, context, lines,
-                                                   run_label='Open run and selection record'))
+                                                   run_label='Open run and selection record', context_separator='\n'))
         if not sent and not lines:
             raise RuntimeError('Slack notification failed; check the run record before retrying any selection')
 
