@@ -106,9 +106,21 @@ class SelectionTests(unittest.TestCase):
             else:
                 self.assertFalse(record.exists())
                 aws.assert_not_called()
-            message = send.call_args.args[1]
-            for value in ('release-A', 'release-B', 'Operator', 'Review', 'https://github.com/owner/repo/actions/runs/123', audit['status']):
-                self.assertIn(value, message)
+            title = ('Termination selection failed' if fail else 'Termination release selected and verified'
+                     if apply else 'Termination selection preview — no writes')
+            expected = [
+                f'{":rotating_light:" if fail else ":information_source:"} *{title}*',
+                'pointer: `website-release`',
+                'old release: `release-A`',
+                'new release: `release-B`',
+                'approver: `Operator`',
+                'reason: `Review`',
+                f"selection status: `{audit['status']}`",
+            ]
+            if fail:
+                expected.append('```Public pointer verification failed```')
+            expected.append('<https://github.com/owner/repo/actions/runs/123|Open run and selection record>')
+            self.assertEqual(send.call_args.args[1], '\n'.join(expected))
 
     def test_dry_run_keeps_r2_read_only(self):
         self.exercise_selector(apply=False)

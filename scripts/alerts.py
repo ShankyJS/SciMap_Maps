@@ -63,10 +63,11 @@ def warning_summary(validation):
     return [f"+ {len(validation['warnings'])} warning(s): {escape(names)}"]
 
 
-def message(level, title, context, lines=(), *, run_label='Open the run and its run-report.json'):
+def message(level, title, context, lines=(), *, run_label='Open the run and its run-report.json',
+            context_separator=' · '):
     icon = {"error": ":rotating_light:", "warning": ":warning:", "info": ":information_source:"}[level]
     header = f"{icon} *{escape(title)}*"
-    details = " · ".join(
+    details = context_separator.join(
         "{}: `{}`".format(key, escape(str(value).replace("`", "'")))
         for key, value in context.items() if value
     )
