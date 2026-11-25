@@ -103,8 +103,8 @@ def selector_transport(operation, *args):
 
 
 def run(args, webhook):
-    context = {'was showing': 'unknown', 'now showing': args.release_id,
-               'approver': args.approved_by or '(not supplied)', 'reason': args.reason or '(not supplied)'}
+    context = {'Was showing': 'unknown', 'Now showing': args.release_id,
+               'Approver': args.approved_by or '(not supplied)', 'Reason': args.reason or '(not supplied)'}
     title = 'Termination selection failed'
     lines = []
     record = Path(args.output) / 'selection-record.json'
@@ -141,11 +141,11 @@ def run(args, webhook):
         raise
     finally:
         if audit:
-            context.update({'was showing': (audit['previous'] or {}).get('release_id', '(unset)'),
-                            'selection status': audit['status']})
+            context.update({'Was showing': (audit['previous'] or {}).get('release_id', '(unset)'),
+                            'Selection status': audit['status']})
         target = 'Public website' if args.pointer == 'website-release' else 'Latest checked dataset'
-        details = [f'Applies to: {target} ({alerts.inline_code(args.pointer)})',
-                   *(f'{key}: {alerts.inline_code(value)}' for key, value in context.items() if value)]
+        details = [f'*Applies to:* {target} ({alerts.inline_code(args.pointer)})',
+                   *(f'*{key}:* {alerts.inline_code(value)}' for key, value in context.items() if value)]
         sent = alerts.send(webhook, alerts.message('error' if lines else 'info', title, {}, [*details, *lines],
                                                    run_label='Open run and selection record'))
         if not sent and not lines:

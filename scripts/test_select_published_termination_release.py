@@ -113,13 +113,13 @@ class SelectionTests(unittest.TestCase):
                      if apply else 'Termination selection preview — no writes')
             expected = [
                 f'{":rotating_light:" if fail else ":information_source:"} *{title}*',
-                'Applies to: Latest checked dataset (`latest-validated`)' if latest
-                else 'Applies to: Public website (`website-release`)',
-                'was showing: `(unset)`' if latest else 'was showing: `release-A`',
-                'now showing: `release-B`',
-                'approver: `Operator`',
-                'reason: `Review`',
-                f"selection status: `{audit['status']}`",
+                '*Applies to:* Latest checked dataset (`latest-validated`)' if latest
+                else '*Applies to:* Public website (`website-release`)',
+                '*Was showing:* `(unset)`' if latest else '*Was showing:* `release-A`',
+                '*Now showing:* `release-B`',
+                '*Approver:* `Operator`',
+                '*Reason:* `Review`',
+                f"*Selection status:* `{audit['status']}`",
             ]
             if fail:
                 expected.append('```Public pointer verification failed```')
