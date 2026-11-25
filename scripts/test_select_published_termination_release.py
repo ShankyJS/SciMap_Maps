@@ -69,15 +69,18 @@ class SelectionTests(unittest.TestCase):
             self.assertIn('Termination selection failed', send.call_args.args[1])
             aws.assert_not_called()
 
-    def exercise_selector(self, apply, fail=False):
+    def exercise_selector(self, apply, fail=False, latest=False):
+        if latest:
+            self.args.pointer = 'latest-validated'
         self.args.apply = apply
         record = Path(self.args.output) / 'selection-record.json'
         audit = {'status': 'unconfirmed' if fail else ('selected' if apply else 'prepared'),
-                 'previous': {'release_id': 'release-A'}, 'selection': {'release_id': 'release-B'}}
+                 'previous': None if latest else {'release_id': 'release-A'},
+                 'selection': {'release_id': 'release-B'}}
 
         def select(flags):
             self.assertEqual('--apply' in flags, apply)
-            self.assertIn('--pointer=website-release', flags)
+            self.assertIn(f'--pointer={self.args.pointer}', flags)
             self.assertIn(f'--upload-record={self.receipt}', flags)
             if apply:
                 self.assertIn(f'--record={record}', flags)
@@ -110,9 +113,10 @@ class SelectionTests(unittest.TestCase):
                      if apply else 'Termination selection preview — no writes')
             expected = [
                 f'{":rotating_light:" if fail else ":information_source:"} *{title}*',
-                'pointer: `website-release`',
-                'old release: `release-A`',
-                'new release: `release-B`',
+                'Applies to: Latest checked dataset (`latest-validated`)' if latest
+                else 'Applies to: Public website (`website-release`)',
+                'was showing: `(unset)`' if latest else 'was showing: `release-A`',
+                'now showing: `release-B`',
                 'approver: `Operator`',
                 'reason: `Review`',
                 f"selection status: `{audit['status']}`",
@@ -124,6 +128,9 @@ class SelectionTests(unittest.TestCase):
 
     def test_dry_run_keeps_r2_read_only(self):
         self.exercise_selector(apply=False)
+
+    def test_latest_checked_preview_without_previous_release(self):
+        self.exercise_selector(apply=False, latest=True)
 
     def test_verified_selection_retains_record_and_alerts(self):
         self.exercise_selector(apply=True)
