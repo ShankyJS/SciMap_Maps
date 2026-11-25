@@ -63,17 +63,20 @@ def warning_summary(validation):
     return [f"+ {len(validation['warnings'])} warning(s): {escape(names)}"]
 
 
-def message(level, title, context, lines=(), *, run_label='Open the run and its run-report.json',
-            context_separator=' · '):
+def inline_code(value):
+    return "`{}`".format(escape(str(value).replace("`", "'")))
+
+
+def message(level, title, context, lines=(), *, run_label='Open the run and its run-report.json'):
     icon = {"error": ":rotating_light:", "warning": ":warning:", "info": ":information_source:"}[level]
     header = f"{icon} *{escape(title)}*"
-    details = context_separator.join(
-        "{}: `{}`".format(key, escape(str(value).replace("`", "'")))
+    details = " · ".join(
+        f"{key}: {inline_code(value)}"
         for key, value in context.items() if value
     )
     url = ci_run_url()
     footer = f"<{url}|{run_label}>" if url else ""
-    body = "\n".join([header, details, *lines]).strip()
+    body = "\n".join([header, *([details] if details else []), *lines]).strip()
     limit = MAX_TEXT - len(footer) - 1
     if len(body) > limit:
         body = body[:limit - 40].rstrip() + "\n… truncated; see run-report.json"
